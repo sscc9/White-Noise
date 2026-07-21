@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Beautiful golden glowing moon centered in the 108dp canvas -->
+    <path
+        android:pathData="M52,26 C40.4,26 31,35.4 31,47 C31,58.6 40.4,68 52,68 C57.5,68 62.5,65.9 66.2,62.4 C52.2,61.8 44.5,50.2 44.5,41 C44.5,34.5 48.5,29 54,27 C53.3,26.4 52.7,26 52,26 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="66.2"
+                android:endY="62.4"
+                android:startX="31"
+                android:startY="26"
+                android:type="linear">
+                <item
+                    android:color="#FFF176"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFB300"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Glowing, radiant cozy star nestled perfectly inside the moon's curve -->
+    <path
+        android:pathData="M65,36 L67.1,40.3 L71.8,41 L68.4,44.3 L69.2,49 L65,46.8 L60.8,49 L61.6,44.3 L58.2,41 L62.9,40.3 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="71.8"
+                android:endY="49"
+                android:startX="58.2"
+                android:startY="36"
+                android:type="linear">
+                <item
+                    android:color="#A5B4FC"
+                    android:offset="0.0" />
+                <item
+                    android:color="#818CF8"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    
+    <!-- Sleep zZZ small bubbles symbolizing deep slumber -->
+    <path
+        android:fillColor="#E0E7FF"
+        android:fillAlpha="0.8"
+        android:pathData="M73.5,22 H81.5 V23.5 L75.5,29.5 H81.5 V31 H73.5 V29.5 L79.5,23.5 H73.5 Z" />
+        
+    <path
+        android:fillColor="#818CF8"
+        android:fillAlpha="0.6"
+        android:pathData="M69,12 H74 V13.2 L70.3,17.2 H74 V18.2 H69 V17.2 L72.7,13.2 H69 Z" />
+
+</vector>

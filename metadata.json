@@ -1,0 +1,6 @@
+{
+  "name": "深眠白噪音",
+  "description": "简洁治愈的睡眠白噪音App，提供定时关闭和自定义混合音效。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

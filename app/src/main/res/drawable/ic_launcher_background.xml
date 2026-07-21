@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="108"
+                android:endY="108"
+                android:startX="0"
+                android:startY="0"
+                android:type="linear">
+                <item
+                    android:color="#0D0B14"
+                    android:offset="0.0" />
+                <item
+                    android:color="#1E1B4B"
+                    android:offset="0.5" />
+                <item
+                    android:color="#2E1065"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Twinkling starry elements for beautiful launcher background depth -->
+    <path
+        android:fillColor="#FFD54F"
+        android:fillAlpha="0.3"
+        android:pathData="M24,18 l1,-1 l1,1 l-1,1 z" />
+    <path
+        android:fillColor="#FFD54F"
+        android:fillAlpha="0.4"
+        android:pathData="M85,25 l1,-1 l1,1 l-1,1 z" />
+    <path
+        android:fillColor="#818CF8"
+        android:fillAlpha="0.3"
+        android:pathData="M15,70 l1,-1 l1,1 l-1,1 z" />
+    <path
+        android:fillColor="#818CF8"
+        android:fillAlpha="0.5"
+        android:pathData="M90,75 l1.5,-1.5 l1.5,1.5 l-1.5,1.5 z" />
+    <path
+        android:fillColor="#FFD54F"
+        android:fillAlpha="0.4"
+        android:pathData="M54,12 l1,-1 l1,1 l-1,1 z" />
+</vector>
