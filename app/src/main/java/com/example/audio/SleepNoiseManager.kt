@@ -12,9 +12,9 @@ object SleepNoiseManager {
         val presetMap = when (presetName) {
             "雨夜安眠" -> mapOf(
                 SoundType.WHITE_NOISE to 0.0f,
-                SoundType.RAIN to 0.7f,
-                SoundType.OCEAN to 0.3f,
-                SoundType.WIND to 0.1f,
+                SoundType.RAIN to 0.8f,
+                SoundType.OCEAN to 0.0f,
+                SoundType.WIND to 0.0f,
                 SoundType.CAMPFIRE to 0.0f,
                 SoundType.CRICKETS to 0.0f,
                 SoundType.SINGING_BOWL to 0.0f,
@@ -41,17 +41,6 @@ object SleepNoiseManager {
                 SoundType.CRICKETS to 0.0f,
                 SoundType.SINGING_BOWL to 0.6f,
                 SoundType.STREAM to 0.5f,
-                SoundType.SNOW_TEA to 0.0f
-            )
-            "助眠白噪" -> mapOf(
-                SoundType.WHITE_NOISE to 0.8f,
-                SoundType.RAIN to 0.2f,
-                SoundType.OCEAN to 0.0f,
-                SoundType.WIND to 0.0f,
-                SoundType.CAMPFIRE to 0.0f,
-                SoundType.CRICKETS to 0.0f,
-                SoundType.SINGING_BOWL to 0.0f,
-                SoundType.STREAM to 0.0f,
                 SoundType.SNOW_TEA to 0.0f
             )
             "深海奇遇" -> mapOf(

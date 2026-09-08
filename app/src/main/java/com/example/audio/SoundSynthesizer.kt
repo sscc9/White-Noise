@@ -20,8 +20,14 @@ class SoundSynthesizer {
     // Brown Noise filter state
     private var lastBrown = 0f
 
-    // Rain drop accumulator state
-    private var rainDropAmp = 0f
+    // Rain synthesizer state: Transparent & natural outdoor/tent/eaves acoustic model
+    private var rainBedFilter = 0f
+    private var rainRes1_y1 = 0f
+    private var rainRes1_y2 = 0f
+    private var rainRes2_y1 = 0f
+    private var rainRes2_y2 = 0f
+    private var rainRes3_y1 = 0f
+    private var rainRes3_y2 = 0f
 
     // Campfire log crackling state
     private var campfireCrackleAmp = 0f
@@ -97,16 +103,49 @@ class SoundSynthesizer {
     fun nextSample(type: SoundType): Float {
         return when (type) {
             SoundType.WHITE_NOISE -> {
-                nextWhite() * 0.4f
+                // 柔和舒缓的温暖气流声（仿风扇/柔和空气感），彻底消除干涩刺耳的电视雪花屏杂音
+                nextPink() * 0.30f + nextBrown() * 0.12f
             }
             SoundType.RAIN -> {
-                val baseRain = nextPink() * 0.6f
-                if (random.nextFloat() < 0.0008f) {
-                    rainDropAmp = 1.0f
+                // 1. 多频段物理敲击谐振器（模拟帐篷布、屋檐瓦片、窗玻璃与枝叶上的雨珠微小撞击质感）
+                // 平均每秒约 120 滴细密水珠，自然泊松分布撞击，节奏密集均匀，无宏观忽大忽小
+                if (random.nextFloat() < (120.0f / sampleRate.toFloat())) {
+                    val impactAmp = 0.08f + random.nextFloat() * 0.12f
+                    when (random.nextInt(3)) {
+                        0 -> rainRes1_y1 += impactAmp * 0.7f // ~950Hz 帐篷布与屋檐的温润弹击
+                        1 -> rainRes2_y1 += impactAmp * 0.5f // ~1650Hz 窗户与细瓦的水珠清脆淅沥
+                        2 -> rainRes3_y1 += impactAmp * 0.3f // ~2600Hz 树叶水花与雨雾微粒飞溅
+                    }
                 }
-                rainDropAmp *= 0.96f
-                val drop = rainDropAmp * nextWhite() * 0.4f
-                baseRain + drop
+
+                // 谐振器计算与微小声学阻尼物理衰减 (15~25ms 自然消散)
+                val y1 = (1.9421f * rainRes1_y1 - 0.9604f * rainRes1_y2).coerceIn(-1.5f, 1.5f)
+                rainRes1_y2 = rainRes1_y1
+                rainRes1_y1 = y1
+
+                val y2 = (1.8963f * rainRes2_y1 - 0.9506f * rainRes2_y2).coerceIn(-1.5f, 1.5f)
+                rainRes2_y2 = rainRes2_y1
+                rainRes2_y1 = y2
+
+                val y3 = (1.8086f * rainRes3_y1 - 0.9409f * rainRes3_y2).coerceIn(-1.5f, 1.5f)
+                rainRes3_y2 = rainRes3_y1
+                rainRes3_y1 = y3
+
+                val patter = (y1 * 0.45f + y2 * 0.35f + y3 * 0.20f) * 0.35f
+
+                // 2. 连续通透自然雨幕（粉红噪音为主体，融合温润布朗底音）
+                val pink = nextPink()
+                val brown = nextBrown()
+                val bedInput = pink * 0.42f + brown * 0.18f
+
+                // 3. 通透性低通滤波（截止频率约 3800Hz）：
+                // 彻底滤除 6kHz 以上的电子白噪尖刺，但保留 1k-4kHz 清爽通透的空气感与湿润感，绝不发闷
+                val alphaBed = 0.38f
+                rainBedFilter += alphaBed * (bedInput - rainBedFilter)
+
+                // 4. 混合通透雨幕与细腻敲击淅沥感，音量绝对平稳恒定，无周期波动
+                val rainOut = rainBedFilter * 1.05f + patter
+                rainOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.OCEAN -> {
                 wavePhase += (2.0 * PI) / (sampleRate * 8.0) // 8-second waves

@@ -387,7 +387,7 @@ fun SleepNoiseScreen(
                             modifier = Modifier.padding(start = 2.dp)
                         )
                         
-                        val defaultPresets = listOf("雨夜安眠", "旷野篝火", "静水灵心", "助眠白噪", "深海奇遇", "红泥煮雪")
+                        val defaultPresets = listOf("雨夜安眠", "旷野篝火", "静水灵心", "深海奇遇", "红泥煮雪")
                         val presets = defaultPresets + customPresets.map { it.name }
                         
                         LazyRow(
