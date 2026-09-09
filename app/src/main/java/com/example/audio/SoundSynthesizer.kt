@@ -29,16 +29,25 @@ class SoundSynthesizer {
     private var rainRes3_y1 = 0f
     private var rainRes3_y2 = 0f
 
-    // Campfire log crackling state
-    private var campfireCrackleAmp = 0f
-    private var lastCampfireWhite = 0f
+    // Campfire wood burning state (Pops, crackles, sparks, and clean warm embers)
+    private var campfireWoodSnapAmp = 0f
+    private var campfireWoodSnapPhase = 0.0
+    private var campfireWoodSnapFreq = 480.0
+    private var campfireMicroCrackleAmp = 0f
+    private var campfireEmberFilter = 0f
 
-    // Ocean waves breathing phase
+    // Ocean waves breathing phase and soft sand foam filter
     private var wavePhase = 0.0
+    private var oceanFoamFilter = 0f
+    private var oceanDeepFilter = 0f
 
-    // Wind sweeping phase and filter state
-    private var windPhase = 0.0
-    private var lastWind = 0f
+    // Forest Pine Wind: Dual-LFO organic gusts, deep canopy bed, and pine needle rustle
+    private var windGustPhase1 = 0.0
+    private var windGustPhase2 = 0.0
+    private var windDeepCanopyFilter = 0f
+    private var pineLastPink = 0f
+    private var pineHPOut = 0f
+    private var pineLPOut = 0f
 
     // Singing bowl fundamental, harmonic, and LFO tremolo phase
     private var bowlPhase1 = 0.0
@@ -63,10 +72,14 @@ class SoundSynthesizer {
     private var chorusLfoPhase = 0.0      // Fast 18Hz Tremolo
     private var chorusSlowSwellPhase = 0.0 // Very slow 0.05Hz wind wave swell
 
-    // Babbling stream bubbling filter and phase
-    private var streamPhase = 0.0
-    private var lastStreamFilter = 0f
-    private var streamFrequency = 1.5
+    // Babbling stream: dual-stage smooth water bed filter, swirl phase, and 3-voice pebble droplet polyphony
+    private var streamBedFilter1 = 0f
+    private var streamBedFilter2 = 0f
+    private var streamSwirlPhase = 0.0
+    private val streamBubblePhase = DoubleArray(3)
+    private val streamBubbleAmp = FloatArray(3)
+    private val streamBubbleDecay = FloatArray(3)
+    private val streamBubbleFreq = DoubleArray(3)
 
     // 3. 红泥煮雪 (Winter Snow & Charcoal Tea-Boiling)
     private val teaBubblePhase = DoubleArray(3)
@@ -148,45 +161,99 @@ class SoundSynthesizer {
                 rainOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.OCEAN -> {
-                wavePhase += (2.0 * PI) / (sampleRate * 8.0) // 8-second waves
+                // 1. 极慢深度睡眠潮汐呼吸周期（14.5 秒超长舒缓周期，模拟夜间沙滩远海涌浪）
+                wavePhase += (2.0 * PI) / (sampleRate * 14.5)
                 if (wavePhase > 2.0 * PI) wavePhase -= 2.0 * PI
-                
-                val waveMod = ((sin(wavePhase) + 1.0) / 2.0).toFloat()
-                val deepOcean = nextBrown() * 0.7f
-                val foam = nextPink() * 0.2f * (waveMod * waveMod)
-                
-                (deepOcean + foam) * (0.25f + 0.75f * waveMod)
+
+                // 2. 温和渐进的平滑波形曲线（起伏落差极其温和，从 0.58 渐变到 0.95，彻底杜绝暴冲惊吓）
+                val rawSine = sin(wavePhase).toFloat()
+                val waveMod = ((rawSine + 1.0f) * 0.5f).coerceIn(0f, 1f)
+                val gentleSwell = 0.58f + 0.38f * waveMod
+
+                // 3. 深远海洋温润低频声床（低通滤波，消除生硬杂音，保留温厚深沉的海浪底蕴）
+                val brown = nextBrown()
+                oceanDeepFilter += 0.05f * (brown - oceanDeepFilter)
+
+                // 4. 细软沙滩泡沫漫涌（带平滑滤波，消除生硬尖锐白花，呈现轻柔抚岸与细沙吸水声）
+                val pink = nextPink()
+                val targetFoam = pink * (0.04f + 0.16f * (waveMod * waveMod))
+                oceanFoamFilter += 0.09f * (targetFoam - oceanFoamFilter)
+
+                // 5. 混合深海温润底床与细沙潮涌，整体音量始终温厚克制、宁静安详
+                val oceanOut = (oceanDeepFilter * 0.75f + oceanFoamFilter * 1.1f) * gentleSwell * 1.5f
+                oceanOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.WIND -> {
-                windPhase += (2.0 * PI) / (sampleRate * 14.0) // 14-second sweeps
-                if (windPhase > 2.0 * PI) windPhase -= 2.0 * PI
-                
-                val sweep = ((sin(windPhase) + 1.0) / 2.0).toFloat()
-                val cutoff = 150.0f + sweep * 350.0f
-                
-                val alpha = cutoff / (sampleRate.toFloat() + cutoff)
-                val brown = nextBrown()
-                lastWind = lastWind + alpha * (brown - lastWind)
-                
-                lastWind * 1.5f
+                // 1. 自然有机阵风模型（双频复合 LFO：13.7s 与 19.3s，交织出非机械重复的自然风势起伏）
+                windGustPhase1 += (2.0 * PI) / (sampleRate * 13.7)
+                if (windGustPhase1 > 2.0 * PI) windGustPhase1 -= 2.0 * PI
+                windGustPhase2 += (2.0 * PI) / (sampleRate * 19.3)
+                if (windGustPhase2 > 2.0 * PI) windGustPhase2 -= 2.0 * PI
+
+                val gust1 = (sin(windGustPhase1) + 1.0) * 0.5
+                val gust2 = (sin(windGustPhase2) + 1.0) * 0.5
+                val gustVelocity = (gust1 * 0.65 + gust2 * 0.35).toFloat() // 0.0f ~ 1.0f 阵风风速
+
+                // 2. 山谷林间深层风息声床（~350Hz 低通平滑温润底音，告别封闭机舱/隧道轰鸣）
+                val rawCanopy = nextBrown() * 0.40f + nextPink() * 0.15f
+                windDeepCanopyFilter += 0.048f * (rawCanopy - windDeepCanopyFilter)
+                val canopySwell = 0.60f + 0.38f * gustVelocity
+
+                // 3. 松针与树梢萧萧掠拂（核心松涛音色：700Hz ~ 1800Hz 级联带通滤波，随阵风动态呼吸）
+                val pink = nextPink()
+                // 高通部分 (fc ~ 700Hz)
+                val alphaHP = 0.909f
+                pineHPOut = alphaHP * (pineHPOut + pink - pineLastPink)
+                pineLastPink = pink
+                // 低通部分 (fc ~ 1800Hz)
+                val alphaLP = 0.204f
+                pineLPOut += alphaLP * (pineHPOut - pineLPOut)
+
+                // 松针沙沙声随阵风起伏，掠过树梢时呈现细腻如轻纱般的松涛质感
+                val needleMod = 0.10f + 0.25f * gustVelocity
+                val pineNeedles = pineLPOut * needleMod * 1.6f
+
+                // 4. 混合林冠深风与松针细语，整体音色通透开阔、温和助眠
+                val windOut = (windDeepCanopyFilter * canopySwell * 1.8f + pineNeedles)
+                windOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.CAMPFIRE -> {
-                val woodFlame = nextBrown() * 0.5f
-                if (random.nextFloat() < 0.00018f) {
-                    campfireCrackleAmp = 1.0f
+                // 1. 木柴受热开裂突发爆裂 (Wood Log Snaps & Pops)
+                // 平均每 0.5 - 1.2 秒发生一次较为清脆明显的木材断裂/树脂爆裂声
+                if (random.nextFloat() < (1.4f / sampleRate.toFloat())) {
+                    campfireWoodSnapAmp = 0.45f + random.nextFloat() * 0.45f
+                    campfireWoodSnapFreq = 380.0 + random.nextDouble() * 320.0
+                    campfireWoodSnapPhase = 0.0
                 }
-                campfireCrackleAmp *= 0.92f
-                
-                val crackle = if (campfireCrackleAmp > 0.01f) {
-                    val w = nextWhite()
-                    val highFreq = w - lastCampfireWhite
-                    lastCampfireWhite = w
-                    highFreq * campfireCrackleAmp * 0.7f
-                } else {
-                    0f
+
+                var woodSnapSignal = 0f
+                if (campfireWoodSnapAmp > 0.002f) {
+                    campfireWoodSnapPhase += (2.0 * PI * campfireWoodSnapFreq) / sampleRate
+                    if (campfireWoodSnapPhase > 2.0 * PI) campfireWoodSnapPhase -= 2.0 * PI
+                    // 木质共鸣腔体阻尼衰减（约 20-30ms 自然消散）
+                    woodSnapSignal = sin(campfireWoodSnapPhase).toFloat() * campfireWoodSnapAmp * 0.55f
+                    // 初始瞬态爆破感 (Transient Click)
+                    if (campfireWoodSnapAmp > 0.35f) {
+                        woodSnapSignal += (nextWhite() - nextWhite()) * campfireWoodSnapAmp * 0.40f
+                    }
+                    campfireWoodSnapAmp *= 0.982f
                 }
-                
-                woodFlame + crackle
+
+                // 2. 细碎炭花与细小火星迸发 (Micro Crackles & Sparks)
+                // 随机高频细微噼啪，每秒 25-40 次轻微噼啪声，灵动真实
+                if (random.nextFloat() < (32.0f / sampleRate.toFloat())) {
+                    campfireMicroCrackleAmp = 0.15f + random.nextFloat() * 0.25f
+                }
+                campfireMicroCrackleAmp *= 0.93f // 极短促（2-4ms）清脆炭花
+                val microCrackle = (nextWhite() - nextWhite()) * campfireMicroCrackleAmp * 0.22f
+
+                // 3. 极微弱温暖余烬底音（彻底移除原先像下雨瀑布一样的 0.5f 粗暴布朗噪音）
+                // 仅保留 0.02f 经由极深低通滤波的温和低频炭火暗涌，声底极其干净纯粹
+                val emberNoise = nextBrown() * 0.025f
+                campfireEmberFilter += 0.06f * (emberNoise - campfireEmberFilter)
+
+                val fireOut = woodSnapSignal + microCrackle + campfireEmberFilter
+                fireOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.CRICKETS -> {
                 // 1. Near Solo Cricket: High precision rhythmic strophe
@@ -268,22 +335,51 @@ class SoundSynthesizer {
                 (tone1 + tone2) * tremolo * 0.5f
             }
             SoundType.STREAM -> {
-                val waterFlow = nextPink() * 0.5f
-                
-                streamPhase += (2.0 * PI * streamFrequency) / sampleRate
-                if (streamPhase > 2.0 * PI) {
-                    streamPhase -= 2.0 * PI
-                    streamFrequency = 1.0 + random.nextDouble() * 1.2
+                // 1. 山涧石缝流水底床（温润平稳的双阶低通滤波水流，彻底消除粗暴喷水与自来水冲水感）
+                val rawBed = nextPink() * 0.32f + nextBrown() * 0.18f
+                val alpha = 0.085f // 截止频率约 600Hz，温润圆融
+                streamBedFilter1 += alpha * (rawBed - streamBedFilter1)
+                streamBedFilter2 += alpha * (streamBedFilter1 - streamBedFilter2)
+
+                // 微弱水流涡旋轻柔呼吸（0.2Hz 微幅波动，自然而不突兀）
+                streamSwirlPhase += (2.0 * PI * 0.2) / sampleRate
+                if (streamSwirlPhase > 2.0 * PI) streamSwirlPhase -= 2.0 * PI
+                val swirl = 0.88f + 0.12f * sin(streamSwirlPhase).toFloat()
+
+                // 2. 卵石激流轻柔水泡与清脆叮咚声（3 复音物理水珠共振）
+                // 平均每秒约 16-24 次轻柔水泡与卵石拍打，自然错落
+                if (random.nextFloat() < (20.0f / sampleRate.toFloat())) {
+                    var minIdx = 0
+                    var minAmp = streamBubbleAmp[0]
+                    for (i in 1..2) {
+                        if (streamBubbleAmp[i] < minAmp) {
+                            minAmp = streamBubbleAmp[i]
+                            minIdx = i
+                        }
+                    }
+                    streamBubbleAmp[minIdx] = 0.15f + random.nextFloat() * 0.25f
+                    streamBubbleFreq[minIdx] = 420.0 + random.nextDouble() * 520.0 // 420Hz ~ 940Hz 灵动水珠声
+                    streamBubbleDecay[minIdx] = 0.9935f - random.nextFloat() * 0.001f // ~18-28ms 快速自然衰减
+                    streamBubblePhase[minIdx] = 0.0
                 }
-                
-                val bubbleMod = ((sin(streamPhase) + 1.0) / 2.0).toFloat()
-                val cutoff = 600.0f + bubbleMod * 400.0f
-                
-                val alpha = cutoff / (sampleRate.toFloat() + cutoff)
-                val noise = nextWhite()
-                lastStreamFilter = lastStreamFilter + alpha * (noise - lastStreamFilter)
-                
-                waterFlow * 0.5f + lastStreamFilter * 0.25f
+
+                var bubbleOutput = 0f
+                for (i in 0..2) {
+                    if (streamBubbleAmp[i] > 0.002f) {
+                        // 微妙向上扫频（水滴脱离与气泡破裂的物理声学特征）
+                        val freqRatio = 1.0 + (1.0f - streamBubbleAmp[i] / 0.40f).coerceIn(0f, 1f) * 0.15
+                        val currentFreq = streamBubbleFreq[i] * freqRatio
+                        streamBubblePhase[i] += (2.0 * PI * currentFreq) / sampleRate
+                        if (streamBubblePhase[i] > 2.0 * PI) streamBubblePhase[i] -= 2.0 * PI
+
+                        bubbleOutput += sin(streamBubblePhase[i]).toFloat() * streamBubbleAmp[i]
+                        streamBubbleAmp[i] *= streamBubbleDecay[i]
+                    }
+                }
+
+                // 3. 混合温润流水底床与叮咚水花，音量均匀平稳
+                val streamOut = streamBedFilter2 * swirl * 1.9f + bubbleOutput * 0.40f
+                streamOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.SNOW_TEA -> {
                 // 1. Boiling tea water bubbles
