@@ -86,9 +86,11 @@ class SoundSynthesizer {
     private val teaBubbleAmp = FloatArray(3)
     private val teaBubbleDecay = FloatArray(3)
     private val teaBubbleFreq = DoubleArray(3)
+    private var teaSimmerBedFilter = 0f
     private var snowWindSvfLow = 0f
     private var snowWindSvfBand = 0f
     private var snowWindPhase = 0.0
+    private var snowWindSmooth = 0f
 
     private fun nextWhite(): Float {
         return random.nextFloat() * 2.0f - 1.0f
@@ -382,8 +384,8 @@ class SoundSynthesizer {
                 streamOut.coerceIn(-1.0f, 1.0f)
             }
             SoundType.SNOW_TEA -> {
-                // 1. Boiling tea water bubbles
-                if (random.nextFloat() < (28.0f / sampleRate.toFloat())) {
+                // 1. 红泥陶壶慢火温煨小水泡（从每秒28次急沸大幅降至8-10次慢火咕嘟，音调下潜至温润厚实的240~460Hz）
+                if (random.nextFloat() < (9.0f / sampleRate.toFloat())) {
                     var minIdx = 0
                     var minAmp = teaBubbleAmp[0]
                     for (i in 1..2) {
@@ -392,17 +394,18 @@ class SoundSynthesizer {
                             minIdx = i
                         }
                     }
-                    // Trigger tiny steam bubble pop
-                    teaBubbleAmp[minIdx] = 0.25f + random.nextFloat() * 0.75f
-                    teaBubbleDecay[minIdx] = 0.994f - random.nextFloat() * 0.001f // ultra fast decay
-                    teaBubbleFreq[minIdx] = 480.0 + random.nextDouble() * 260.0
+                    teaBubbleAmp[minIdx] = 0.20f + random.nextFloat() * 0.30f
+                    teaBubbleDecay[minIdx] = 0.9968f - random.nextFloat() * 0.0008f // ~35-50ms 温润自然消散
+                    teaBubbleFreq[minIdx] = 240.0 + random.nextDouble() * 220.0 // 陶壶温厚低频水泡
                     teaBubblePhase[minIdx] = 0.0
                 }
 
                 var bubbleSum = 0f
                 for (i in 0..2) {
                     if (teaBubbleAmp[i] > 0.001f) {
-                        teaBubblePhase[i] += (2.0 * PI * teaBubbleFreq[i]) / sampleRate
+                        val freqRatio = 1.0 + (1.0f - teaBubbleAmp[i] / 0.50f).coerceIn(0f, 1f) * 0.12
+                        val currentFreq = teaBubbleFreq[i] * freqRatio
+                        teaBubblePhase[i] += (2.0 * PI * currentFreq) / sampleRate
                         if (teaBubblePhase[i] > 2.0 * PI) teaBubblePhase[i] -= 2.0 * PI
 
                         bubbleSum += sin(teaBubblePhase[i]).toFloat() * teaBubbleAmp[i]
@@ -410,28 +413,35 @@ class SoundSynthesizer {
                     }
                 }
 
-                // 2. Cold winter howling wind draft SVF filter sweep
-                snowWindPhase += (2.0 * PI * 0.04) / sampleRate
+                // 2. 陶壶温热水体微沸声床（柔和低频，沉静舒适）
+                val rawTeaBed = nextBrown() * 0.20f + nextPink() * 0.08f
+                teaSimmerBedFilter += 0.035f * (rawTeaBed - teaSimmerBedFilter)
+
+                // 3. 窗外积雪冬日温和冷风（彻底去除原先Q=8.5尖厉口哨啸音！改用Q=1.3宽带低沉雪风拂过）
+                snowWindPhase += (2.0 * PI * 0.032) / sampleRate
                 if (snowWindPhase > 2.0 * PI) snowWindPhase -= 2.0 * PI
-                val centerFreq = 850.0 + (sin(snowWindPhase) + 1.0) * 400.0 // sweeps 850Hz to 1650Hz
-                val q = 8.5f // narrow whistling wind
+                val centerFreq = 320.0 + (sin(snowWindPhase) + 1.0) * 160.0 // 320Hz ~ 640Hz 低回温和，绝无刺耳哨音
+                val q = 1.3f // 宽带柔和，平滑宁静
 
                 val f = (PI * centerFreq / sampleRate).toFloat().coerceIn(0.01f, 0.99f)
                 val qInv = 1.0f / q
 
-                val inputNoise = nextPink() * 0.2f
+                val inputNoise = nextPink() * 0.15f
                 val hp = inputNoise - snowWindSvfLow - qInv * snowWindSvfBand
                 snowWindSvfBand += f * hp
                 snowWindSvfLow += f * snowWindSvfBand
-                val whistlingWind = snowWindSvfBand * 0.75f
+                val gentleSnowWind = snowWindSvfBand * 0.45f
+                snowWindSmooth += 0.05f * (gentleSnowWind - snowWindSmooth)
 
-                // 3. Cozy Red Clay Charcoal tiny crackles
+                // 4. 红泥炉炭火微弱温软木炭脆响（清幽雅致）
                 var charcoalCrackle = 0f
-                if (random.nextFloat() < (1.5f / sampleRate.toFloat())) {
-                    charcoalCrackle = (random.nextFloat() * 2f - 1f) * 0.08f
+                if (random.nextFloat() < (1.2f / sampleRate.toFloat())) {
+                    charcoalCrackle = (random.nextFloat() * 2f - 1f) * 0.06f
                 }
 
-                whistlingWind + bubbleSum * 0.18f + charcoalCrackle
+                // 5. 混合陶壶慢煨咕嘟声、温润水床与窗外积雪微风，温暖惬意极度助眠
+                val snowTeaOut = bubbleSum * 0.45f + teaSimmerBedFilter * 1.6f + snowWindSmooth + charcoalCrackle
+                snowTeaOut.coerceIn(-1.0f, 1.0f)
             }
         }
     }
