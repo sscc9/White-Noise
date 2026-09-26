@@ -58,17 +58,25 @@ class SleepNoiseService : Service() {
         super.onCreate()
         Log.d(TAG, "Service created")
         createNotificationChannel()
+        SleepNoiseManager.initPreferences(applicationContext)
         
         // Observe playing state changes in the manager
         serviceScope.launch {
             SleepNoiseManager.isPlaying.collect { isPlaying ->
                 if (isPlaying) {
                     startAudioPlayback()
-                    updateNotification()
-                } else {
-                    stopAudioPlayback()
-                    updateNotification()
                 }
+                updateNotification()
+            }
+        }
+
+        // Observe TLR training state changes
+        serviceScope.launch {
+            SleepNoiseManager.isTlrActive.collect { isTlr ->
+                if (isTlr) {
+                    startAudioPlayback()
+                }
+                updateNotification()
             }
         }
 
@@ -78,10 +86,12 @@ class SleepNoiseService : Service() {
                 if (timestamp > 0L) {
                     val cueType = SleepNoiseManager.lucidCueSoundType.value
                     lucidCueSynthesizer.triggerCue(cueType)
+                    startAudioPlayback()
                     updateNotification()
                     if (SleepNoiseManager.isLucidCueTesting.value) {
                         delay(6500)
                         SleepNoiseManager.stopLucidCuePreview()
+                        updateNotification()
                     }
                 }
             }
@@ -179,7 +189,10 @@ class SleepNoiseService : Service() {
             }
         } else {
             val preset = SleepNoiseManager.activePreset.value
-            if (SleepNoiseManager.isLucidCueEnabled.value) {
+            if (SleepNoiseManager.isTlrActive.value) {
+                val step = SleepNoiseManager.tlrStep.value
+                "🎯 现实检验配对中 · 步骤 $step/3 (环境静音)"
+            } else if (SleepNoiseManager.isLucidCueEnabled.value) {
                 val elapsed = SleepNoiseManager.lucidCueElapsedSeconds.value
                 val delaySec = SleepNoiseManager.lucidCueDelayMinutes.value * 60
                 if (elapsed < delaySec) {
@@ -265,11 +278,9 @@ class SleepNoiseService : Service() {
     @Synchronized
     private fun startAudioPlayback() {
         if (isAudioRunning.get()) {
-            targetMasterFade = 1f
             return
         }
         isAudioRunning.set(true)
-        targetMasterFade = 1f
         currentMasterFade = 0f
 
         playbackJob = serviceScope.launch(Dispatchers.Default) {
@@ -306,6 +317,11 @@ class SleepNoiseService : Service() {
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
 
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioTrack failed to initialize")
+                    return@launch
+                }
+
                 audioTrack = track
                 track.play()
                 Log.d(TAG, "Stereo AudioTrack started playing")
@@ -315,140 +331,147 @@ class SleepNoiseService : Service() {
 
                 var localElapsedSeconds = SleepNoiseManager.binauralElapsedSeconds.value
                 val buffer = ShortArray(2048) // Interleaved stereo buffer
+                val cueStereo = FloatArray(2) // Reusable stereo buffer for lucid dream cues
+                val fadeStep = 1.0f / (sampleRate.toFloat() * 1.5f) // 1.5 seconds linear fade for background
+
                 while (isActive && isAudioRunning.get()) {
-                    if (targetMasterFade == 0f && currentMasterFade <= 0.001f) {
+                    val isCueActive = lucidCueSynthesizer.isActive
+                    val isTlrActive = SleepNoiseManager.isTlrActive.value
+                    val isTesting = SleepNoiseManager.isLucidCueTesting.value
+                    val isBgPlaying = SleepNoiseManager.isPlaying.value && !isTlrActive && !isTesting
+                    val targetBgFade = if (isBgPlaying) 1.0f else 0.0f
+
+                    // Exit condition: if background stopped and faded out, and no cue/TLR/preview is running
+                    val shouldAudioRun = isBgPlaying || isTlrActive || isTesting || isCueActive || (currentMasterFade > 0.001f)
+                    if (!shouldAudioRun) {
                         break
                     }
 
+                    val cueVolume = SleepNoiseManager.getEffectiveCueVolume()
                     val activeMode = SleepNoiseManager.playingMode.value
-                    
+
                     if (activeMode == "BINAURAL") {
                         val themeId = SleepNoiseManager.binauralThemeId.value
                         val managerElapsed = SleepNoiseManager.binauralElapsedSeconds.value
-                        
-                        // If the manager's elapsed time changes significantly (e.g. user manually seeks, resets, or triggers a change)
+
                         if (Math.abs(managerElapsed - localElapsedSeconds) > 1.5) {
                             localElapsedSeconds = managerElapsed
                         }
-                        
+
                         val duration = SleepNoiseManager.binauralDurationMinutes.value * 60.0
                         val promptEnabled = SleepNoiseManager.binauralSeparationPromptEnabled.value
                         val calVol = SleepNoiseManager.binauralCalibrationVolume.value
                         val alarmA = SleepNoiseManager.binauralAlarmTimeA.value
                         val alarmB = SleepNoiseManager.binauralAlarmTimeB.value
 
-                        val fadeStep = 1.0f / (sampleRate.toFloat() * 2.0f) // 2.0 seconds linear fade
                         for (i in 0 until (buffer.size / 2)) {
-                            binauralSynthesizer.nextSample(
-                                themeId = themeId,
-                                elapsedSeconds = localElapsedSeconds,
-                                totalDurationSeconds = duration,
-                                promptEnabled = promptEnabled,
-                                calibrationVolume = calVol,
-                                alarmTimeA = alarmA,
-                                alarmTimeB = alarmB
-                            )
-                            var sampleL = binauralSynthesizer.outL
-                            var sampleR = binauralSynthesizer.outR
-
-                            // Apply soft clipping (tanh) to double-brain paths before limiting
-                            sampleL = kotlin.math.tanh(sampleL)
-                            sampleR = kotlin.math.tanh(sampleR)
-
-                            // Apply master fade in float domain
-                            if (currentMasterFade < targetMasterFade) {
-                                currentMasterFade = (currentMasterFade + fadeStep).coerceAtMost(targetMasterFade)
-                            } else if (currentMasterFade > targetMasterFade) {
-                                currentMasterFade = (currentMasterFade - fadeStep).coerceAtLeast(targetMasterFade)
+                            if (currentMasterFade < targetBgFade) {
+                                currentMasterFade = (currentMasterFade + fadeStep).coerceAtMost(targetBgFade)
+                            } else if (currentMasterFade > targetBgFade) {
+                                currentMasterFade = (currentMasterFade - fadeStep).coerceAtLeast(targetBgFade)
                             }
-                            sampleL *= currentMasterFade
-                            sampleR *= currentMasterFade
 
-                            // Explicitly limit to [-1f, 1f] to prevent integer wrap-around (crackling/嚓)
-                            sampleL = sampleL.coerceIn(-1f, 1f)
-                            sampleR = sampleR.coerceIn(-1f, 1f)
+                            var sampleL = 0f
+                            var sampleR = 0f
+                            if (isBgPlaying && currentMasterFade > 0.001f) {
+                                binauralSynthesizer.nextSample(
+                                    themeId = themeId,
+                                    elapsedSeconds = localElapsedSeconds,
+                                    totalDurationSeconds = duration,
+                                    promptEnabled = promptEnabled,
+                                    calibrationVolume = calVol,
+                                    alarmTimeA = alarmA,
+                                    alarmTimeB = alarmB
+                                )
+                                sampleL = kotlin.math.tanh(binauralSynthesizer.outL) * currentMasterFade
+                                sampleR = kotlin.math.tanh(binauralSynthesizer.outR) * currentMasterFade
+                            }
 
-                            buffer[2 * i] = (sampleL * 32767f).toInt().toShort()
-                            buffer[2 * i + 1] = (sampleR * 32767f).toInt().toShort()
+                            // Mix in gentle Lucid Dream Cue without background master fade attenuation
+                            if (isCueActive) {
+                                lucidCueSynthesizer.nextStereoSample(cueStereo)
+                                sampleL += cueStereo[0] * cueVolume
+                                sampleR += cueStereo[1] * cueVolume
+                            }
+
+                            val limitedL = kotlin.math.tanh(sampleL.toDouble()).toFloat() * 0.95f
+                            val limitedR = kotlin.math.tanh(sampleR.toDouble()).toFloat() * 0.95f
+
+                            buffer[2 * i] = (limitedL * 32767f).toInt().toShort()
+                            buffer[2 * i + 1] = (limitedR * 32767f).toInt().toShort()
                             localElapsedSeconds += 1.0 / sampleRate.toDouble()
                         }
                     } else {
-                        // White noise: Dual Mono with zero-allocation cache loop
+                        // White noise: Dual Mono with zero-allocation cache loop + true stereo cues
                         val currentVolumes = SleepNoiseManager.volumes.value
-                        val isCueActive = lucidCueSynthesizer.isActive
-                        val cueVolume = SleepNoiseManager.lucidCueVolume.value
-                        val fadeStep = 1.0f / (sampleRate.toFloat() * 2.0f) // 2.0 seconds linear fade
                         for (i in 0 until (buffer.size / 2)) {
+                            if (currentMasterFade < targetBgFade) {
+                                currentMasterFade = (currentMasterFade + fadeStep).coerceAtMost(targetBgFade)
+                            } else if (currentMasterFade > targetBgFade) {
+                                currentMasterFade = (currentMasterFade - fadeStep).coerceAtLeast(targetBgFade)
+                            }
+
                             var mixedSample = 0f
-                            val size = soundTypes.size
-                            for (j in 0 until size) {
-                                val type = soundTypes[j]
-                                val vol = currentVolumes[type] ?: 0f
-                                if (vol > 0.01f) {
-                                    mixedSample += synthesizer.nextSample(type) * vol
+                            if (isBgPlaying && currentMasterFade > 0.001f) {
+                                val size = soundTypes.size
+                                for (j in 0 until size) {
+                                    val type = soundTypes[j]
+                                    val vol = currentVolumes[type] ?: 0f
+                                    if (vol > 0.01f) {
+                                        mixedSample += synthesizer.nextSample(type) * vol
+                                    }
                                 }
                             }
 
-                            // Mix in gentle Lucid Dream Reality Check Audio Cue if active
+                            var sampleL = mixedSample * currentMasterFade
+                            var sampleR = mixedSample * currentMasterFade
+
+                            // Mix in gentle Lucid Dream Cue with immediate crisp attack (NO master fade attenuation)
                             if (isCueActive) {
-                                val cueSample = lucidCueSynthesizer.nextSample()
-                                mixedSample += cueSample * cueVolume
+                                lucidCueSynthesizer.nextStereoSample(cueStereo)
+                                sampleL += cueStereo[0] * cueVolume
+                                sampleR += cueStereo[1] * cueVolume
                             }
 
-                            // Apply master fade in float domain
-                            if (currentMasterFade < targetMasterFade) {
-                                currentMasterFade = (currentMasterFade + fadeStep).coerceAtMost(targetMasterFade)
-                            } else if (currentMasterFade > targetMasterFade) {
-                                currentMasterFade = (currentMasterFade - fadeStep).coerceAtLeast(targetMasterFade)
-                            }
+                            val limitedL = kotlin.math.tanh(sampleL.toDouble()).toFloat() * 0.95f
+                            val limitedR = kotlin.math.tanh(sampleR.toDouble()).toFloat() * 0.95f
 
-                            mixedSample = mixedSample.coerceIn(-1.0f, 1.0f) * 0.9f
-                            mixedSample *= currentMasterFade
-
-                            val shortVal = (mixedSample * 32767f).toInt().toShort()
-                            buffer[2 * i] = shortVal
-                            buffer[2 * i + 1] = shortVal
+                            buffer[2 * i] = (limitedL * 32767f).toInt().toShort()
+                            buffer[2 * i + 1] = (limitedR * 32767f).toInt().toShort()
                         }
                     }
 
-                    track.write(buffer, 0, buffer.size)
+                    try {
+                        if (track.state == AudioTrack.STATE_INITIALIZED) {
+                            track.write(buffer, 0, buffer.size)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "AudioTrack write failed", e)
+                        break
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in audio synthesis loop", e)
             } finally {
                 releaseAudioTrack()
                 isAudioRunning.set(false)
+                playbackJob = null
             }
         }
     }
 
     @Synchronized
     private fun stopAudioPlayback() {
-        if (!isAudioRunning.get()) return
-        targetMasterFade = 0f
-        
-        serviceScope.launch {
-            var waitTime = 0
-            while (isAudioRunning.get() && targetMasterFade == 0f && waitTime < 250) {
-                delay(10)
-                waitTime++
-            }
-            if (isAudioRunning.get() && targetMasterFade == 0f) {
-                isAudioRunning.set(false)
-                playbackJob?.cancel()
-                playbackJob = null
-                releaseAudioTrack()
-            }
-        }
+        // Background target fade is smoothly handled in audio loop
     }
 
     private fun releaseAudioTrack() {
         try {
             audioTrack?.apply {
                 if (state == AudioTrack.STATE_INITIALIZED) {
-                    stop()
+                    try { stop() } catch (ignored: Exception) {}
                 }
-                release()
+                try { release() } catch (ignored: Exception) {}
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing AudioTrack", e)
@@ -461,23 +484,13 @@ class SleepNoiseService : Service() {
         Log.d(TAG, "Stopping service")
         SleepNoiseManager.setPlaying(false)
         SleepNoiseManager.stopTimer()
-        targetMasterFade = 0f
+        SleepNoiseManager.cancelTlrTraining()
+        SleepNoiseManager.stopLucidCuePreview()
+        isAudioRunning.set(false)
         
-        serviceScope.launch {
-            var waitTime = 0
-            while (isAudioRunning.get() && waitTime < 250) {
-                delay(10)
-                waitTime++
-            }
-            isAudioRunning.set(false)
-            playbackJob?.cancel()
-            playbackJob = null
-            releaseAudioTrack()
-            
-            timerJob?.cancel()
-            serviceJob.cancel()
-            stopSelf()
-        }
+        timerJob?.cancel()
+        serviceJob.cancel()
+        stopSelf()
     }
 
     override fun onDestroy() {

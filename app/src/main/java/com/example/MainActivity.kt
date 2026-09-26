@@ -129,9 +129,13 @@ fun SleepNoiseScreen(
     val lucidCueElapsedSeconds by SleepNoiseManager.lucidCueElapsedSeconds.collectAsState()
     val lucidCueSoundType by SleepNoiseManager.lucidCueSoundType.collectAsState()
     val lucidCueVolume by SleepNoiseManager.lucidCueVolume.collectAsState()
-    val lucidCueRepeatIntervalMinutes by SleepNoiseManager.lucidCueRepeatIntervalMinutes.collectAsState()
+    val isProgressiveVolume by SleepNoiseManager.isProgressiveVolume.collectAsState()
+    val lucidCueMaxTriggers by SleepNoiseManager.lucidCueMaxTriggers.collectAsState()
     val isLucidCueTesting by SleepNoiseManager.isLucidCueTesting.collectAsState()
     val lucidCueTriggerCount by SleepNoiseManager.lucidCueTriggerCount.collectAsState()
+    val isTlrActive by SleepNoiseManager.isTlrActive.collectAsState()
+    val tlrStep by SleepNoiseManager.tlrStep.collectAsState()
+    val tlrCountdown by SleepNoiseManager.tlrCountdown.collectAsState()
 
     var isCalibrating by remember { mutableStateOf(false) }
 
@@ -141,6 +145,7 @@ fun SleepNoiseScreen(
     ) { _ -> }
 
     LaunchedEffect(Unit) {
+        SleepNoiseManager.initPreferences(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
                     context,
@@ -813,21 +818,30 @@ fun SleepNoiseScreen(
                                 onDelayChange = { SleepNoiseManager.setLucidCueDelayMinutes(it) },
                                 soundType = lucidCueSoundType,
                                 onSoundTypeChange = { SleepNoiseManager.setLucidCueSoundType(it) },
-                                repeatInterval = lucidCueRepeatIntervalMinutes,
-                                onRepeatIntervalChange = { SleepNoiseManager.setLucidCueRepeatIntervalMinutes(it) },
+                                maxTriggers = lucidCueMaxTriggers,
+                                onMaxTriggersChange = { SleepNoiseManager.setLucidCueMaxTriggers(it) },
                                 volume = lucidCueVolume,
                                 onVolumeChange = { SleepNoiseManager.setLucidCueVolume(it) },
+                                isProgressiveVolume = isProgressiveVolume,
+                                onProgressiveVolumeChange = { SleepNoiseManager.setProgressiveVolume(it) },
+                                isTlrActive = isTlrActive,
+                                tlrStep = tlrStep,
+                                tlrCountdown = tlrCountdown,
+                                onStartTlr = {
+                                    SleepNoiseManager.startTlrTraining()
+                                    onSendAction(SleepNoiseService.ACTION_START)
+                                },
+                                onNextTlrStep = { SleepNoiseManager.nextTlrStep() },
+                                onCancelTlr = {
+                                    SleepNoiseManager.cancelTlrTraining()
+                                },
                                 elapsedSeconds = lucidCueElapsedSeconds,
                                 triggerCount = lucidCueTriggerCount,
                                 isPlaying = isPlaying && playingMode == "WHITE_NOISE",
                                 isTesting = isLucidCueTesting,
                                 onPreviewClick = {
-                                    if (!isPlaying) {
-                                        SleepNoiseManager.setPlayingMode("WHITE_NOISE")
-                                        SleepNoiseManager.setPlaying(true)
-                                        onSendAction(SleepNoiseService.ACTION_PLAY)
-                                    }
                                     SleepNoiseManager.triggerLucidCuePreview()
+                                    onSendAction(SleepNoiseService.ACTION_START)
                                 },
                                 onResetElapsed = { SleepNoiseManager.resetLucidCueElapsed() }
                             )
@@ -1616,10 +1630,18 @@ fun LucidDreamCueCard(
     onDelayChange: (Int) -> Unit,
     soundType: Int,
     onSoundTypeChange: (Int) -> Unit,
-    repeatInterval: Int,
-    onRepeatIntervalChange: (Int) -> Unit,
+    maxTriggers: Int,
+    onMaxTriggersChange: (Int) -> Unit,
     volume: Float,
     onVolumeChange: (Float) -> Unit,
+    isProgressiveVolume: Boolean,
+    onProgressiveVolumeChange: (Boolean) -> Unit,
+    isTlrActive: Boolean,
+    tlrStep: Int,
+    tlrCountdown: Int,
+    onStartTlr: () -> Unit,
+    onNextTlrStep: () -> Unit,
+    onCancelTlr: () -> Unit,
     elapsedSeconds: Int,
     triggerCount: Int,
     isPlaying: Boolean,
@@ -1742,11 +1764,143 @@ fun LucidDreamCueCard(
                             )
                         }
                         Text(
-                            text = "您在后半夜睡了3~4小时醒来时，大脑深睡眠已基本充足。此时醒来看手机、开启此提醒后放着「深海奇遇」继续睡，人体仅需约 35~45 分钟 就会快速直接进入高密度 REM 快速眼动做梦期！\n\n🌟 推荐设置：45 分钟（入睡耗时约15分 + 梦境高潮期25分）。微弱的专属线索音将在做梦正浓时渗透进梦境，促使您在梦中惊觉：'我正在做梦！' 从而步入清醒梦。",
+                            text = "后半夜睡了3~4小时醒来重睡（WBTB），大脑的慢波深睡眠已基本充足。此时醒来看手机、稍作清醒后重睡，人体通常在 35~60 分钟内更容易快速进入高密度的 REM（快速眼动做梦期），但具体潜伏期因人而异。\n\n🌟 推荐初设：45 分钟左右。线索音起效的关键是‘高频反差动机’（例如双音钟 528:660Hz 的上行大三度），能自然穿透低沉海浪，在梦中留下鲜明印记。",
                             fontSize = 11.sp,
                             color = Color.White.copy(alpha = 0.82f),
                             lineHeight = 17.sp
                         )
+                    }
+                }
+
+                // 🎯 TLR (Targeted Lucidity Reactivation) Awake Pairing Card
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = if (isTlrActive) Color(0x356366F1) else Color(0x18818CF8)),
+                    border = BorderStroke(1.dp, if (isTlrActive) AccentIndigo else Color(0x30818CF8)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Psychology,
+                                    contentDescription = "TLR Training",
+                                    tint = if (isTlrActive) GlowingStar else AccentIndigo,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "🎯 现实检验配对 (TLR 觉察训练)",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+
+                            if (!isTlrActive) {
+                                Button(
+                                    onClick = onStartTlr,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = AccentIndigo),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(30.dp).testTag("start_tlr_button")
+                                ) {
+                                    Text("开始配对 (45秒)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+
+                        if (!isTlrActive) {
+                            Text(
+                                text = "科学清醒梦核心秘诀：线索音只有在清醒时建立过反射，梦中才不会被当成普通的杂音。夜醒后建议花45秒跟随提示做3次“看手觉察练习”，让前额叶深刻联结！",
+                                fontSize = 11.sp,
+                                color = Color.White.copy(alpha = 0.70f),
+                                lineHeight = 16.sp
+                            )
+                        } else {
+                            // Active TLR Training step
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                LinearProgressIndicator(
+                                    progress = { tlrStep / 4f },
+                                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                    color = GlowingStar,
+                                    trackColor = Color.White.copy(alpha = 0.1f)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = if (tlrStep <= 3) "正在进行第 $tlrStep / 3 组觉察配对" else "✨ 配对已顺利完成！",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = GlowingStar
+                                    )
+                                    if (tlrStep <= 3) {
+                                        Text(
+                                            text = "${tlrCountdown}s 自动下一组",
+                                            fontSize = 11.sp,
+                                            color = Color.White.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+
+                                val promptText = when (tlrStep) {
+                                    1 -> "🔔 听到了刚刚的声音吗？请低头仔细注视你的双手手心，数一数手指，认真质问自己：‘我现在是在现实，还是在做梦？’"
+                                    2 -> "🔔 再次听到声音！请回忆你刚才几分钟是怎么醒来的，确认周围物理规律。在大脑中建立锚定：‘今夜只要在梦中听到这个声音，我就会看手检验！’"
+                                    3 -> "🔔 很好！最后一次深呼吸，感受全身放松。潜意识已牢牢锁定了这段线索。在心底默念：‘等下做梦时，这声呼唤会让我瞬间清醒！’"
+                                    else -> "🎉 联结已成功建立！大脑听觉与反思皮层已准备就绪。现在安心放空，伴随「深海奇遇」入睡，在梦境高潮时等待呼唤吧！"
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color.White.copy(alpha = 0.08f))
+                                        .padding(10.dp)
+                                ) {
+                                    Text(
+                                        text = promptText,
+                                        fontSize = 12.sp,
+                                        color = Color.White,
+                                        lineHeight = 18.sp
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    TextButton(onClick = onCancelTlr) {
+                                        Text(if (tlrStep >= 4) "完成" else "退出", fontSize = 11.sp, color = Color.White.copy(alpha = 0.6f))
+                                    }
+                                    if (tlrStep in 1..3) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Button(
+                                            onClick = onNextTlrStep,
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = AccentIndigo),
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.height(30.dp)
+                                        ) {
+                                            Text("完成本组 · 下一步", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1863,26 +2017,40 @@ fun LucidDreamCueCard(
                                         color = Color.White.copy(alpha = 0.75f)
                                     )
                                 } else {
-                                    Text(
-                                        text = "✨ 梦境线索已激活",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = GlowingStar
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    val nextRepeatSec = if (repeatInterval > 0) {
-                                        val interval = repeatInterval * 60
-                                        val passed = (elapsedSeconds - delaySec) % interval
-                                        (interval - passed)
-                                    } else 0
-                                    val repeatTip = if (repeatInterval > 0) {
-                                        "，下次在 ${nextRepeatSec / 60}分${nextRepeatSec % 60}秒 后"
-                                    } else " (单次已完成)"
-                                    Text(
-                                        text = "已在梦中唤醒 $triggerCount 次$repeatTip",
-                                        fontSize = 11.sp,
-                                        color = Color.White.copy(alpha = 0.75f)
-                                    )
+                                    val isLimitReached = maxTriggers in 1..triggerCount
+                                    if (isLimitReached) {
+                                        Text(
+                                            text = "🌙 黄金做梦期线索已播完 ($triggerCount/$maxTriggers)",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = GlowingStar
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "已自动静音休眠，深海奇遇将持续伴睡，守护整夜优质睡眠",
+                                            fontSize = 11.sp,
+                                            color = Color.White.copy(alpha = 0.75f)
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "✨ 梦境线索已激活",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = GlowingStar
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        val intervalSec = 15 * 60
+                                        val passed = (elapsedSeconds - delaySec) % intervalSec
+                                        val nextRepeatSec = intervalSec - passed
+                                        val repeatTip = if (maxTriggers > 1) {
+                                            "，下次在 ${nextRepeatSec / 60}分${nextRepeatSec % 60}秒 后"
+                                        } else " (单次已完成)"
+                                        Text(
+                                            text = "已在梦中唤醒 $triggerCount/$maxTriggers 次$repeatTip",
+                                            fontSize = 11.sp,
+                                            color = Color.White.copy(alpha = 0.75f)
+                                        )
+                                    }
                                 }
                             } else {
                                 Text(
@@ -1986,25 +2154,34 @@ fun LucidDreamCueCard(
                     }
                 }
 
-                // Repeat Interval Selection
+                // Trigger Frequency & REM Sleep Protection
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Shield,
+                                contentDescription = "Sleep Protection",
+                                tint = AccentIndigo,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "提醒频次 (做梦期防打扰保护)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color.White
+                            )
+                        }
                         Text(
-                            text = "做梦期重复提醒间隔",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = Color.White
-                        )
-                        Text(
-                            text = when (repeatInterval) {
-                                0 -> "仅响1次"
-                                15 -> "每15分钟 (推荐)"
-                                20 -> "每20分钟"
-                                else -> "每$repeatInterval 分钟"
+                            text = when (maxTriggers) {
+                                1 -> "仅响 1 次"
+                                2 -> "响 2 次"
+                                3 -> "响 3 次 (推荐🌟)"
+                                else -> "响 $maxTriggers 次"
                             },
                             fontSize = 11.sp,
                             color = AccentIndigo,
@@ -2013,17 +2190,16 @@ fun LucidDreamCueCard(
                     }
 
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        val intervals = listOf(
-                            0 to "仅响1次",
-                            15 to "每15分 🌟",
-                            20 to "每20分",
-                            30 to "每30分"
+                        val limits = listOf(
+                            1 to "仅响 1 次",
+                            2 to "响 2 次",
+                            3 to "响 3 次 🌟"
                         )
-                        intervals.forEach { (mins, label) ->
-                            val isSelected = repeatInterval == mins
+                        limits.forEach { (count, label) ->
+                            val isSelected = maxTriggers == count
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
@@ -2037,9 +2213,9 @@ fun LucidDreamCueCard(
                                         if (isSelected) AccentIndigo else Color.Transparent,
                                         RoundedCornerShape(12.dp)
                                     )
-                                    .clickable { onRepeatIntervalChange(mins) }
-                                    .padding(vertical = 8.dp)
-                                    .testTag("lucid_repeat_$mins"),
+                                    .clickable { onMaxTriggersChange(count) }
+                                    .padding(vertical = 10.dp)
+                                    .testTag("lucid_max_trigger_$count"),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
@@ -2052,6 +2228,13 @@ fun LucidDreamCueCard(
                             }
                         }
                     }
+
+                    Text(
+                        text = "💡 科学防打扰机制：首次提醒在设定延迟（如 45 分钟）时触发；若设为 2~3 次，后续按做梦期快速眼动（REM）节律每隔 15 分钟轻柔触发一次。播完后系统立即自动休眠转为纯背景音，绝不反复打扰后半夜深睡眠。",
+                        fontSize = 10.sp,
+                        color = Color.White.copy(alpha = 0.5f),
+                        lineHeight = 15.sp
+                    )
                 }
 
                 // Cue Volume & Preview
@@ -2088,6 +2271,42 @@ fun LucidDreamCueCard(
                             .height(28.dp)
                             .testTag("lucid_volume_slider")
                     )
+
+                    // Progressive Volume Ladder Toggle
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.04f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "阶梯渐进微音量 (推荐)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "首次提醒从70%微音量开始，若未唤醒则后续递增，避免初次惊醒",
+                                fontSize = 10.sp,
+                                color = Color.White.copy(alpha = 0.5f)
+                            )
+                        }
+                        Switch(
+                            checked = isProgressiveVolume,
+                            onCheckedChange = onProgressiveVolumeChange,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = AccentIndigo,
+                                uncheckedThumbColor = Color.White.copy(alpha = 0.6f),
+                                uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+                            ),
+                            modifier = Modifier.testTag("progressive_volume_switch")
+                        )
+                    }
 
                     Text(
                         text = "💡 建议调至清醒时隐约能听到的轻柔级别即可，避免直接惊醒，刚好让梦中感知。",
