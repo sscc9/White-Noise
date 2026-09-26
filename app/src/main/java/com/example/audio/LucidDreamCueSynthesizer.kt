@@ -67,7 +67,7 @@ class LucidDreamCueSynthesizer {
 
         // Durations with generous tail room for natural reverb decay
         cueTotalSamples = when (cueType) {
-            1 -> (sampleRate * 6.5).toLong() // 2-tone bell
+            1 -> (sampleRate * 6.0).toLong() // 2-tone bell
             2 -> (sampleRate * 6.0).toLong() // Crystal wind chimes
             3 -> (sampleRate * 6.8).toLong() // Dream music box
             4 -> (sampleRate * 5.5).toLong() // 3 crystal dew drops
@@ -132,28 +132,28 @@ class LucidDreamCueSynthesizer {
             1 -> {
                 // Type 1: 现实检验双音钟 (528Hz & 660Hz 上行大三度)
                 // Tone A: 528Hz at t = 0s
-                val attackA = 0.04
+                val attackA = 0.05
                 val dtA = t
                 val decayA = if (dtA >= 0.0) {
                     val att = if (dtA < attackA) (dtA / attackA).toFloat() else 1f
-                    att * exp(-dtA * 0.70).toFloat()
+                    att * exp(-dtA * 0.72).toFloat()
                 } else 0f
 
                 bellPhaseA += (2.0 * PI * 528.0) / sampleRate
                 if (bellPhaseA > 2.0 * PI) bellPhaseA -= 2.0 * PI
-                val sampleA = (sin(bellPhaseA) + 0.25 * sin(bellPhaseA * 2.0)).toFloat() * decayA * 0.60f
+                val sampleA = (sin(bellPhaseA) + 0.3 * sin(bellPhaseA * 2.0)).toFloat() * decayA * 0.60f
 
-                // Tone B: 660Hz at t = 1.1s
+                // Tone B: 660Hz at t = 1.2s
                 var sampleB = 0f
-                if (t >= 1.1) {
-                    val dtB = t - 1.1
-                    val attackB = 0.04
+                if (t >= 1.2) {
+                    val dtB = t - 1.2
+                    val attackB = 0.05
                     val attB = if (dtB < attackB) (dtB / attackB).toFloat() else 1f
-                    val decayB = attB * exp(-dtB * 0.70).toFloat()
+                    val decayB = attB * exp(-dtB * 0.72).toFloat()
 
                     bellPhaseB += (2.0 * PI * 660.0) / sampleRate
                     if (bellPhaseB > 2.0 * PI) bellPhaseB -= 2.0 * PI
-                    sampleB = (sin(bellPhaseB) + 0.25 * sin(bellPhaseB * 2.0)).toFloat() * decayB * 0.55f
+                    sampleB = (sin(bellPhaseB) + 0.3 * sin(bellPhaseB * 2.0)).toFloat() * decayB * 0.55f
                 }
 
                 rawMono = sampleA + sampleB
