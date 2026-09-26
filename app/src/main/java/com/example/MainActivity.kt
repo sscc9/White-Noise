@@ -123,6 +123,16 @@ fun SleepNoiseScreen(
     val binauralAlarmTimeA by SleepNoiseManager.binauralAlarmTimeA.collectAsState()
     val binauralAlarmTimeB by SleepNoiseManager.binauralAlarmTimeB.collectAsState()
 
+    // Observe Lucid Dream Cue (WBTB) states from SleepNoiseManager
+    val isLucidCueEnabled by SleepNoiseManager.isLucidCueEnabled.collectAsState()
+    val lucidCueDelayMinutes by SleepNoiseManager.lucidCueDelayMinutes.collectAsState()
+    val lucidCueElapsedSeconds by SleepNoiseManager.lucidCueElapsedSeconds.collectAsState()
+    val lucidCueSoundType by SleepNoiseManager.lucidCueSoundType.collectAsState()
+    val lucidCueVolume by SleepNoiseManager.lucidCueVolume.collectAsState()
+    val lucidCueRepeatIntervalMinutes by SleepNoiseManager.lucidCueRepeatIntervalMinutes.collectAsState()
+    val isLucidCueTesting by SleepNoiseManager.isLucidCueTesting.collectAsState()
+    val lucidCueTriggerCount by SleepNoiseManager.lucidCueTriggerCount.collectAsState()
+
     var isCalibrating by remember { mutableStateOf(false) }
 
     // Request notification permission on Android 13+
@@ -581,23 +591,41 @@ fun SleepNoiseScreen(
                                     fontWeight = FontWeight.Medium
                                 )
                             } else {
-                                val timerText = if (isTimerActive) {
-                                    formatTime(timerRemainingSeconds)
-                                } else {
-                                    "无定时"
+                                val timerText = when {
+                                    isTimerActive -> formatTime(timerRemainingSeconds)
+                                    isLucidCueEnabled && isPlaying -> {
+                                        val delaySec = lucidCueDelayMinutes * 60
+                                        if (lucidCueElapsedSeconds < delaySec) {
+                                            formatTime(delaySec - lucidCueElapsedSeconds)
+                                        } else {
+                                            "线索x$lucidCueTriggerCount"
+                                        }
+                                    }
+                                    isLucidCueEnabled -> "${lucidCueDelayMinutes}m 线索"
+                                    else -> "无定时"
                                 }
                                 Text(
                                     text = timerText,
-                                    fontSize = 28.sp,
+                                    fontSize = if (timerText.length > 5) 24.sp else 28.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color.White,
                                     letterSpacing = 1.sp
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
+                                val sphereSubtitle = when {
+                                    isTimerActive && isLucidCueEnabled -> "定时关闭 + 梦境线索"
+                                    isTimerActive -> if (isPlaying) "深慢呼吸..." else "静候睡眠..."
+                                    isLucidCueEnabled && isPlaying -> {
+                                        val delaySec = lucidCueDelayMinutes * 60
+                                        if (lucidCueElapsedSeconds < delaySec) "清醒梦线索倒计时" else "梦境中已唤醒 $lucidCueTriggerCount 次"
+                                    }
+                                    isLucidCueEnabled -> "清醒梦提醒已就绪"
+                                    else -> if (isPlaying) "深慢呼吸..." else "静候睡眠..."
+                                }
                                 Text(
-                                    text = if (isPlaying) "深慢呼吸..." else "静候睡眠...",
+                                    text = sphereSubtitle,
                                     fontSize = 11.sp,
-                                    color = Color.White.copy(alpha = 0.8f)
+                                    color = if (isLucidCueEnabled) GlowingStar else Color.White.copy(alpha = 0.8f)
                                 )
                             }
                         }
@@ -777,6 +805,33 @@ fun SleepNoiseScreen(
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
+                            // Lucid Dream Reality Check Audio Cue (WBTB) Card
+                            LucidDreamCueCard(
+                                isEnabled = isLucidCueEnabled,
+                                onEnabledChange = { SleepNoiseManager.setLucidCueEnabled(it) },
+                                delayMinutes = lucidCueDelayMinutes,
+                                onDelayChange = { SleepNoiseManager.setLucidCueDelayMinutes(it) },
+                                soundType = lucidCueSoundType,
+                                onSoundTypeChange = { SleepNoiseManager.setLucidCueSoundType(it) },
+                                repeatInterval = lucidCueRepeatIntervalMinutes,
+                                onRepeatIntervalChange = { SleepNoiseManager.setLucidCueRepeatIntervalMinutes(it) },
+                                volume = lucidCueVolume,
+                                onVolumeChange = { SleepNoiseManager.setLucidCueVolume(it) },
+                                elapsedSeconds = lucidCueElapsedSeconds,
+                                triggerCount = lucidCueTriggerCount,
+                                isPlaying = isPlaying && playingMode == "WHITE_NOISE",
+                                isTesting = isLucidCueTesting,
+                                onPreviewClick = {
+                                    if (!isPlaying) {
+                                        SleepNoiseManager.setPlayingMode("WHITE_NOISE")
+                                        SleepNoiseManager.setPlaying(true)
+                                        onSendAction(SleepNoiseService.ACTION_PLAY)
+                                    }
+                                    SleepNoiseManager.triggerLucidCuePreview()
+                                },
+                                onResetElapsed = { SleepNoiseManager.resetLucidCueElapsed() }
+                            )
+
                             // Sliders Mixer section header
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1552,3 +1607,523 @@ fun getSoundIcon(name: String): ImageVector {
         else -> Icons.Rounded.MusicNote
     }
 }
+
+@Composable
+fun LucidDreamCueCard(
+    isEnabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    delayMinutes: Int,
+    onDelayChange: (Int) -> Unit,
+    soundType: Int,
+    onSoundTypeChange: (Int) -> Unit,
+    repeatInterval: Int,
+    onRepeatIntervalChange: (Int) -> Unit,
+    volume: Float,
+    onVolumeChange: (Float) -> Unit,
+    elapsedSeconds: Int,
+    triggerCount: Int,
+    isPlaying: Boolean,
+    isTesting: Boolean,
+    onPreviewClick: () -> Unit,
+    onResetElapsed: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                if (isEnabled) Color(0x1F818CF8) else GlassCardBg
+            )
+            .border(
+                width = 1.dp,
+                brush = if (isEnabled) {
+                    Brush.verticalGradient(listOf(AccentIndigo.copy(alpha = 0.5f), AccentPurple.copy(alpha = 0.3f)))
+                } else {
+                    Brush.verticalGradient(listOf(GlassCardBorderTop, GlassCardBorderBottom))
+                },
+                shape = RoundedCornerShape(20.dp)
+            )
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // 1. Header with Title & Master Switch
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (isEnabled) AccentIndigo.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isEnabled) Icons.Rounded.Visibility else Icons.Rounded.Bedtime,
+                        contentDescription = "Lucid Cue Icon",
+                        tint = if (isEnabled) AccentIndigo else Color.White.copy(alpha = 0.5f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column {
+                    Text(
+                        text = "清醒梦 · 现实检验提醒 (WBTB)",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isEnabled) Color.White else Color.White.copy(alpha = 0.85f)
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (isEnabled) "已就绪 · 入睡做梦时轻柔呼唤，助你觉察在做梦" else "关闭状态 · 完全维持日常普通声音原样",
+                        fontSize = 11.sp,
+                        color = if (isEnabled) AccentIndigo else Color.White.copy(alpha = 0.45f)
+                    )
+                }
+            }
+
+            Switch(
+                checked = isEnabled,
+                onCheckedChange = onEnabledChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = AccentIndigo,
+                    uncheckedThumbColor = Color.White.copy(alpha = 0.6f),
+                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+                ),
+                modifier = Modifier.testTag("lucid_cue_switch")
+            )
+        }
+
+        // 2. Expandable Rich Controls (Visible when switch is ON)
+        AnimatedVisibility(
+            visible = isEnabled,
+            enter = expandVertically(tween(350)) + fadeIn(tween(350)),
+            exit = shrinkVertically(tween(350)) + fadeOut(tween(350))
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                HorizontalDivider(modifier = Modifier.fillMaxWidth(), color = Color.White.copy(alpha = 0.08f))
+
+                // Scientific WBTB Tip Card
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0x25818CF8)),
+                    border = BorderStroke(1.dp, Color(0x40818CF8)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Lightbulb,
+                                contentDescription = "WBTB Tip",
+                                tint = GlowingStar,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "夜醒重睡 (WBTB) 清醒梦黄金律",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                        Text(
+                            text = "您在后半夜睡了3~4小时醒来时，大脑深睡眠已基本充足。此时醒来看手机、开启此提醒后放着「深海奇遇」继续睡，人体仅需约 35~45 分钟 就会快速直接进入高密度 REM 快速眼动做梦期！\n\n🌟 推荐设置：45 分钟（入睡耗时约15分 + 梦境高潮期25分）。微弱的专属线索音将在做梦正浓时渗透进梦境，促使您在梦中惊觉：'我正在做梦！' 从而步入清醒梦。",
+                            fontSize = 11.sp,
+                            color = Color.White.copy(alpha = 0.82f),
+                            lineHeight = 17.sp
+                        )
+                    }
+                }
+
+                // Delay Selection: How many minutes until cue sounds
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "入睡后多久播放梦境线索",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "$delayMinutes 分钟",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = AccentIndigo
+                        )
+                    }
+
+                    // Preset Chips
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val delayPresets = listOf(
+                            30 to "30分",
+                            45 to "45分 🌟",
+                            60 to "60分",
+                            75 to "75分",
+                            90 to "90分"
+                        )
+                        delayPresets.forEach { (mins, label) ->
+                            val isSelected = delayMinutes == mins
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isSelected) AccentIndigo.copy(alpha = 0.35f)
+                                        else Color.White.copy(alpha = 0.06f)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) AccentIndigo else Color.Transparent,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable { onDelayChange(mins) }
+                                    .padding(vertical = 8.dp)
+                                    .testTag("lucid_delay_$mins"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isSelected) Color.White else Color.White.copy(alpha = 0.7f),
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+
+                    // Slider for fine adjustments
+                    Slider(
+                        value = delayMinutes.toFloat(),
+                        onValueChange = { onDelayChange(it.toInt()) },
+                        valueRange = 15f..120f,
+                        steps = 20,
+                        colors = SliderDefaults.colors(
+                            activeTrackColor = AccentIndigo,
+                            thumbColor = AccentIndigo
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(28.dp)
+                            .testTag("lucid_delay_slider")
+                    )
+                }
+
+                // Realtime Status & Countdown Indicator
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(alpha = 0.05f))
+                        .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(14.dp))
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            if (isPlaying) {
+                                val delaySec = delayMinutes * 60
+                                if (elapsedSeconds < delaySec) {
+                                    val remSec = delaySec - elapsedSeconds
+                                    Text(
+                                        text = "⏳ 梦境线索就绪倒计时中",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = GlowingStar
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "已入睡计时 ${formatTime(elapsedSeconds)} · 将在 ${remSec / 60}分${remSec % 60}秒 后播放线索",
+                                        fontSize = 11.sp,
+                                        color = Color.White.copy(alpha = 0.75f)
+                                    )
+                                } else {
+                                    Text(
+                                        text = "✨ 梦境线索已激活",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = GlowingStar
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    val nextRepeatSec = if (repeatInterval > 0) {
+                                        val interval = repeatInterval * 60
+                                        val passed = (elapsedSeconds - delaySec) % interval
+                                        (interval - passed)
+                                    } else 0
+                                    val repeatTip = if (repeatInterval > 0) {
+                                        "，下次在 ${nextRepeatSec / 60}分${nextRepeatSec % 60}秒 后"
+                                    } else " (单次已完成)"
+                                    Text(
+                                        text = "已在梦中唤醒 $triggerCount 次$repeatTip",
+                                        fontSize = 11.sp,
+                                        color = Color.White.copy(alpha = 0.75f)
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = "💤 伴睡待启动",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White.copy(alpha = 0.85f)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "点击上方主播放键伴睡，将在入睡 $delayMinutes 分钟后轻柔呼唤梦中意识",
+                                    fontSize = 11.sp,
+                                    color = Color.White.copy(alpha = 0.55f)
+                                )
+                            }
+                        }
+
+                        if (elapsedSeconds > 0) {
+                            TextButton(
+                                onClick = onResetElapsed,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("lucid_reset_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = "Reset Timer",
+                                    tint = AccentIndigo,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("重置", fontSize = 11.sp, color = AccentIndigo)
+                            }
+                        }
+                    }
+                }
+
+                // Sound Cue Selection (4 options)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "选择梦境现实检验线索音效",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color.White
+                    )
+
+                    val soundOptions = listOf(
+                        1 to ("🎶 现实检验双音钟" to "528Hz与660Hz空灵双音阶 · 强烈材质反差，深海奇遇首选 🌟"),
+                        2 to ("✨ 梦境水晶风铃" to "4声清越高频银铃 · 晶莹剔透，完全跳脱水声与铜钵"),
+                        3 to ("🎼 灵性八音盒" to "4音纯净机械拨片 · 童话感清脆旋律，梦中极易察觉"),
+                        4 to ("💧 幽潭灵露" to "三声晶莹短促水滴 · 灵动自然，水系梦境奇点"),
+                        5 to ("🔔 空灵颂钵" to "传统432Hz泛音 · 适合雨夜/无钵声预设，深海奇遇不建议")
+                    )
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        soundOptions.forEach { (typeId, pair) ->
+                            val (title, desc) = pair
+                            val isSelected = soundType == typeId
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isSelected) AccentIndigo.copy(alpha = 0.25f)
+                                        else Color.White.copy(alpha = 0.04f)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) AccentIndigo.copy(alpha = 0.6f) else Color.Transparent,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable { onSoundTypeChange(typeId) }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    .testTag("lucid_sound_$typeId"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = title,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (isSelected) AccentIndigo else Color.White
+                                    )
+                                    Text(
+                                        text = desc,
+                                        fontSize = 11.sp,
+                                        color = Color.White.copy(alpha = 0.5f)
+                                    )
+                                }
+
+                                if (isSelected) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(AccentIndigo)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Repeat Interval Selection
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "做梦期重复提醒间隔",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White
+                        )
+                        Text(
+                            text = when (repeatInterval) {
+                                0 -> "仅响1次"
+                                15 -> "每15分钟 (推荐)"
+                                20 -> "每20分钟"
+                                else -> "每$repeatInterval 分钟"
+                            },
+                            fontSize = 11.sp,
+                            color = AccentIndigo,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val intervals = listOf(
+                            0 to "仅响1次",
+                            15 to "每15分 🌟",
+                            20 to "每20分",
+                            30 to "每30分"
+                        )
+                        intervals.forEach { (mins, label) ->
+                            val isSelected = repeatInterval == mins
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isSelected) AccentIndigo.copy(alpha = 0.35f)
+                                        else Color.White.copy(alpha = 0.06f)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) AccentIndigo else Color.Transparent,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable { onRepeatIntervalChange(mins) }
+                                    .padding(vertical = 8.dp)
+                                    .testTag("lucid_repeat_$mins"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isSelected) Color.White else Color.White.copy(alpha = 0.7f),
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Cue Volume & Preview
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "提醒音量微调",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "${(volume * 100).toInt()}%",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = AccentIndigo
+                        )
+                    }
+
+                    Slider(
+                        value = volume,
+                        onValueChange = onVolumeChange,
+                        valueRange = 0.10f..0.80f,
+                        colors = SliderDefaults.colors(
+                            activeTrackColor = AccentIndigo,
+                            thumbColor = AccentIndigo
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(28.dp)
+                            .testTag("lucid_volume_slider")
+                    )
+
+                    Text(
+                        text = "💡 建议调至清醒时隐约能听到的轻柔级别即可，避免直接惊醒，刚好让梦中感知。",
+                        fontSize = 11.sp,
+                        color = Color.White.copy(alpha = 0.45f)
+                    )
+
+                    // Preview Button
+                    Button(
+                        onClick = onPreviewClick,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isTesting) AccentPurple else AccentIndigo.copy(alpha = 0.25f)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .testTag("lucid_preview_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isTesting) Icons.Rounded.GraphicEq else Icons.Rounded.VolumeUp,
+                            contentDescription = "Preview Cue",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isTesting) "正在试听梦境提醒声 (约6秒)..." else "试听提醒声音量 (Preview)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+

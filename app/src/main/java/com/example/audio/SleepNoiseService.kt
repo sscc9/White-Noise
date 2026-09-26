@@ -40,6 +40,7 @@ class SleepNoiseService : Service() {
 
     private val synthesizer = SoundSynthesizer()
     private val binauralSynthesizer = BinauralSynthesizer()
+    private val lucidCueSynthesizer = LucidDreamCueSynthesizer()
     private val soundTypes = SoundType.values()
 
     companion object {
@@ -67,6 +68,21 @@ class SleepNoiseService : Service() {
                 } else {
                     stopAudioPlayback()
                     updateNotification()
+                }
+            }
+        }
+
+        // Observe Lucid Dream Cue trigger events
+        serviceScope.launch {
+            SleepNoiseManager.lucidCueTriggerEvent.collect { timestamp ->
+                if (timestamp > 0L) {
+                    val cueType = SleepNoiseManager.lucidCueSoundType.value
+                    lucidCueSynthesizer.triggerCue(cueType)
+                    updateNotification()
+                    if (SleepNoiseManager.isLucidCueTesting.value) {
+                        delay(6500)
+                        SleepNoiseManager.stopLucidCuePreview()
+                    }
                 }
             }
         }
@@ -163,7 +179,21 @@ class SleepNoiseService : Service() {
             }
         } else {
             val preset = SleepNoiseManager.activePreset.value
-            "当前混音模式: $preset"
+            if (SleepNoiseManager.isLucidCueEnabled.value) {
+                val elapsed = SleepNoiseManager.lucidCueElapsedSeconds.value
+                val delaySec = SleepNoiseManager.lucidCueDelayMinutes.value * 60
+                if (elapsed < delaySec) {
+                    val rem = delaySec - elapsed
+                    val m = rem / 60
+                    val s = rem % 60
+                    "$preset · 梦境提醒: 倒计时 ${m}分${s}秒"
+                } else {
+                    val count = SleepNoiseManager.lucidCueTriggerCount.value
+                    "$preset · 清醒梦线索已提醒 $count 次"
+                }
+            } else {
+                "当前混音模式: $preset"
+            }
         }
 
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
@@ -345,6 +375,8 @@ class SleepNoiseService : Service() {
                     } else {
                         // White noise: Dual Mono with zero-allocation cache loop
                         val currentVolumes = SleepNoiseManager.volumes.value
+                        val isCueActive = lucidCueSynthesizer.isActive
+                        val cueVolume = SleepNoiseManager.lucidCueVolume.value
                         val fadeStep = 1.0f / (sampleRate.toFloat() * 2.0f) // 2.0 seconds linear fade
                         for (i in 0 until (buffer.size / 2)) {
                             var mixedSample = 0f
@@ -356,6 +388,13 @@ class SleepNoiseService : Service() {
                                     mixedSample += synthesizer.nextSample(type) * vol
                                 }
                             }
+
+                            // Mix in gentle Lucid Dream Reality Check Audio Cue if active
+                            if (isCueActive) {
+                                val cueSample = lucidCueSynthesizer.nextSample()
+                                mixedSample += cueSample * cueVolume
+                            }
+
                             // Apply master fade in float domain
                             if (currentMasterFade < targetMasterFade) {
                                 currentMasterFade = (currentMasterFade + fadeStep).coerceAtMost(targetMasterFade)

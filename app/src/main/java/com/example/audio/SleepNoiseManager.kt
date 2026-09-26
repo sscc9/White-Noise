@@ -116,6 +116,80 @@ object SleepNoiseManager {
     private val _binauralAlarmTimeB = MutableStateFlow(6.0f) // hours
     val binauralAlarmTimeB: StateFlow<Float> = _binauralAlarmTimeB.asStateFlow()
 
+    // --- Lucid Dream Cue (WBTB Reality Check in White Noise) ---
+    private val _isLucidCueEnabled = MutableStateFlow(false)
+    val isLucidCueEnabled: StateFlow<Boolean> = _isLucidCueEnabled.asStateFlow()
+
+    // Delay in minutes until cue first triggers (default 45 min - optimal scientific sweet spot for WBTB)
+    private val _lucidCueDelayMinutes = MutableStateFlow(45)
+    val lucidCueDelayMinutes: StateFlow<Int> = _lucidCueDelayMinutes.asStateFlow()
+
+    // Elapsed seconds for current lucid cue cycle
+    private val _lucidCueElapsedSeconds = MutableStateFlow(0)
+    val lucidCueElapsedSeconds: StateFlow<Int> = _lucidCueElapsedSeconds.asStateFlow()
+
+    // 1: 藏地磬钵, 2: 现实检验双音钟, 3: 幽潭灵露, 4: 潜意识和弦
+    private val _lucidCueSoundType = MutableStateFlow(1)
+    val lucidCueSoundType: StateFlow<Int> = _lucidCueSoundType.asStateFlow()
+
+    // Cue volume multiplier (0.1f ~ 0.9f, default 0.35f)
+    private val _lucidCueVolume = MutableStateFlow(0.35f)
+    val lucidCueVolume: StateFlow<Float> = _lucidCueVolume.asStateFlow()
+
+    // Repeat interval after first trigger: 0 (once only), 15 (every 15 min), 20, 30
+    private val _lucidCueRepeatIntervalMinutes = MutableStateFlow(15)
+    val lucidCueRepeatIntervalMinutes: StateFlow<Int> = _lucidCueRepeatIntervalMinutes.asStateFlow()
+
+    // Event signal to trigger cue playback in audio synthesizer
+    private val _lucidCueTriggerEvent = MutableStateFlow(0L)
+    val lucidCueTriggerEvent: StateFlow<Long> = _lucidCueTriggerEvent.asStateFlow()
+
+    // Number of times cue has sounded during this sleep session
+    private val _lucidCueTriggerCount = MutableStateFlow(0)
+    val lucidCueTriggerCount: StateFlow<Int> = _lucidCueTriggerCount.asStateFlow()
+
+    // Preview state (awake testing)
+    private val _isLucidCueTesting = MutableStateFlow(false)
+    val isLucidCueTesting: StateFlow<Boolean> = _isLucidCueTesting.asStateFlow()
+
+    fun setLucidCueEnabled(enabled: Boolean) {
+        _isLucidCueEnabled.value = enabled
+        if (!enabled) {
+            _lucidCueElapsedSeconds.value = 0
+            _lucidCueTriggerCount.value = 0
+        }
+    }
+
+    fun setLucidCueDelayMinutes(mins: Int) {
+        _lucidCueDelayMinutes.value = mins.coerceIn(5, 240)
+    }
+
+    fun setLucidCueSoundType(type: Int) {
+        _lucidCueSoundType.value = type
+    }
+
+    fun setLucidCueVolume(vol: Float) {
+        _lucidCueVolume.value = vol.coerceIn(0.05f, 1.0f)
+    }
+
+    fun setLucidCueRepeatIntervalMinutes(mins: Int) {
+        _lucidCueRepeatIntervalMinutes.value = mins
+    }
+
+    fun resetLucidCueElapsed() {
+        _lucidCueElapsedSeconds.value = 0
+        _lucidCueTriggerCount.value = 0
+    }
+
+    fun triggerLucidCuePreview() {
+        _isLucidCueTesting.value = true
+        _lucidCueTriggerEvent.value = System.currentTimeMillis()
+    }
+
+    fun stopLucidCuePreview() {
+        _isLucidCueTesting.value = false
+    }
+
     fun setPlaying(playing: Boolean) {
         _isPlaying.value = playing
     }
@@ -210,6 +284,25 @@ object SleepNoiseManager {
                     _isPlaying.value = false // session completed
                 }
             } else {
+                // White noise mode
+                // 1. Handle Lucid Dream Cue progression if enabled
+                if (_isLucidCueEnabled.value) {
+                    _lucidCueElapsedSeconds.value += 1
+                    val elapsed = _lucidCueElapsedSeconds.value
+                    val delaySec = _lucidCueDelayMinutes.value * 60
+                    if (elapsed == delaySec) {
+                        _lucidCueTriggerEvent.value = System.currentTimeMillis()
+                        _lucidCueTriggerCount.value += 1
+                    } else if (elapsed > delaySec && _lucidCueRepeatIntervalMinutes.value > 0) {
+                        val repeatSec = _lucidCueRepeatIntervalMinutes.value * 60
+                        if ((elapsed - delaySec) % repeatSec == 0) {
+                            _lucidCueTriggerEvent.value = System.currentTimeMillis()
+                            _lucidCueTriggerCount.value += 1
+                        }
+                    }
+                }
+
+                // 2. Handle white noise timer countdown
                 if (_isTimerActive.value) {
                     val remaining = _timerRemainingSeconds.value
                     if (remaining > 1) {
@@ -217,7 +310,10 @@ object SleepNoiseManager {
                     } else {
                         _timerRemainingSeconds.value = 0
                         _isTimerActive.value = false
-                        _isPlaying.value = false
+                        // If lucid cue is active, keep background playback alive so the dream cue will sound!
+                        if (!_isLucidCueEnabled.value) {
+                            _isPlaying.value = false
+                        }
                     }
                 }
             }
