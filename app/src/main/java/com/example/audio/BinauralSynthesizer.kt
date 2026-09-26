@@ -755,6 +755,11 @@ class SchroederReverb(
         }
         return out
     }
+
+    fun reset() {
+        combFilters.forEach { it.reset() }
+        allPassFilters.forEach { it.reset() }
+    }
 }
 
 class CombFilter(val delaySamples: Int, var feedback: Float) {
@@ -768,6 +773,11 @@ class CombFilter(val delaySamples: Int, var feedback: Float) {
         writeIdx = (writeIdx + 1) % delaySamples
         return output
     }
+
+    fun reset() {
+        buffer.fill(0f)
+        writeIdx = 0
+    }
 }
 
 class AllPassFilter(val delaySamples: Int, var feedback: Float) {
@@ -780,6 +790,11 @@ class AllPassFilter(val delaySamples: Int, var feedback: Float) {
         buffer[writeIdx] = newValue
         writeIdx = (writeIdx + 1) % delaySamples
         return output - feedback * newValue
+    }
+
+    fun reset() {
+        buffer.fill(0f)
+        writeIdx = 0
     }
 }
 

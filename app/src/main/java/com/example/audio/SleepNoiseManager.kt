@@ -1,10 +1,31 @@
 package com.example.audio
 
+import android.content.Context
+import android.content.SharedPreferences
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 
 object SleepNoiseManager {
+    private const val LUCID_PREFS_NAME = "lucid_cue_prefs"
+    private const val KEY_LUCID_ENABLED = "enabled"
+    private const val KEY_LUCID_DELAY = "delay_minutes"
+    private const val KEY_LUCID_SOUND = "sound_type"
+    private const val KEY_LUCID_VOLUME = "volume"
+    private const val KEY_LUCID_REPEAT = "repeat_minutes"
+    private const val KEY_SESSION_ACTIVE = "session_active"
+    private const val KEY_SESSION_ELAPSED = "session_elapsed"
+    private const val KEY_SESSION_COUNT = "session_count"
+    private const val KEY_SESSION_LAST_FIRED = "session_last_fired"
+    private const val KEY_SESSION_PRESET = "session_preset"
+    private const val KEY_SESSION_VOLUMES = "session_volumes"
+    private const val SESSION_SAVE_INTERVAL_SECONDS = 30
+
+    private var lucidPrefs: SharedPreferences? = null
+
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
@@ -128,7 +149,7 @@ object SleepNoiseManager {
     private val _lucidCueElapsedSeconds = MutableStateFlow(0)
     val lucidCueElapsedSeconds: StateFlow<Int> = _lucidCueElapsedSeconds.asStateFlow()
 
-    // 1: 藏地磬钵, 2: 现实检验双音钟, 3: 幽潭灵露, 4: 潜意识和弦
+    // 1: 现实检验双音钟, 2: 梦境水晶风铃, 3: 灵性八音盒, 4: 幽潭灵露, 5: 空灵颂钵
     private val _lucidCueSoundType = MutableStateFlow(1)
     val lucidCueSoundType: StateFlow<Int> = _lucidCueSoundType.asStateFlow()
 
@@ -140,9 +161,14 @@ object SleepNoiseManager {
     private val _lucidCueRepeatIntervalMinutes = MutableStateFlow(15)
     val lucidCueRepeatIntervalMinutes: StateFlow<Int> = _lucidCueRepeatIntervalMinutes.asStateFlow()
 
-    // Event signal to trigger cue playback in audio synthesizer
-    private val _lucidCueTriggerEvent = MutableStateFlow(0L)
-    val lucidCueTriggerEvent: StateFlow<Long> = _lucidCueTriggerEvent.asStateFlow()
+    // One-shot trigger events for the audio synthesizer. A conflated channel (not a StateFlow) so a
+    // (re)created service never replays an old trigger, while a preview sent just before the service
+    // starts collecting is still delivered once.
+    private val lucidCueTriggerChannel = Channel<Unit>(Channel.CONFLATED)
+    val lucidCueTriggerEvents: Flow<Unit> = lucidCueTriggerChannel.receiveAsFlow()
+
+    // Elapsed second at which the cue last sounded in this session (valid when trigger count > 0)
+    private var lucidCueLastFiredAtSeconds = 0
 
     // Number of times cue has sounded during this sleep session
     private val _lucidCueTriggerCount = MutableStateFlow(0)
@@ -152,38 +178,135 @@ object SleepNoiseManager {
     private val _isLucidCueTesting = MutableStateFlow(false)
     val isLucidCueTesting: StateFlow<Boolean> = _isLucidCueTesting.asStateFlow()
 
+    /**
+     * Load persisted lucid cue settings. Safe to call more than once; only the first call has effect.
+     * Call from both the Activity and the Service, since either may be the first to start the process.
+     */
+    fun init(context: Context) {
+        if (lucidPrefs != null) return
+        val prefs = context.applicationContext.getSharedPreferences(LUCID_PREFS_NAME, Context.MODE_PRIVATE)
+        lucidPrefs = prefs
+        _isLucidCueEnabled.value = prefs.getBoolean(KEY_LUCID_ENABLED, _isLucidCueEnabled.value)
+        _lucidCueDelayMinutes.value = prefs.getInt(KEY_LUCID_DELAY, _lucidCueDelayMinutes.value).coerceIn(5, 240)
+        _lucidCueSoundType.value = prefs.getInt(KEY_LUCID_SOUND, _lucidCueSoundType.value).coerceIn(1, 5)
+        _lucidCueVolume.value = prefs.getFloat(KEY_LUCID_VOLUME, _lucidCueVolume.value).coerceIn(0.05f, 1.0f)
+        _lucidCueRepeatIntervalMinutes.value =
+            prefs.getInt(KEY_LUCID_REPEAT, _lucidCueRepeatIntervalMinutes.value).coerceAtLeast(0)
+    }
+
+    /**
+     * If the process was killed in the middle of a lucid cue night (the service was restarted by
+     * START_STICKY), restore the mix and cue progress and resume playback.
+     * Returns true if a session was resumed.
+     */
+    fun restoreInterruptedLucidSession(): Boolean {
+        val prefs = lucidPrefs ?: return false
+        if (!prefs.getBoolean(KEY_SESSION_ACTIVE, false) || !_isLucidCueEnabled.value) return false
+
+        val savedVolumes = prefs.getString(KEY_SESSION_VOLUMES, null)
+        if (savedVolumes != null) {
+            val parsed = savedVolumes.split(';').mapNotNull { entry ->
+                val parts = entry.split('=')
+                val type = SoundType.values().firstOrNull { it.name == parts.getOrNull(0) }
+                val vol = parts.getOrNull(1)?.toFloatOrNull()
+                if (type != null && vol != null) type to vol.coerceIn(0f, 1f) else null
+            }.toMap()
+            _volumes.value = SoundType.values().associate { it to (parsed[it] ?: 0.0f) }
+        }
+        prefs.getString(KEY_SESSION_PRESET, null)?.let { _activePreset.value = it }
+        _lucidCueElapsedSeconds.value = prefs.getInt(KEY_SESSION_ELAPSED, 0).coerceAtLeast(0)
+        _lucidCueTriggerCount.value = prefs.getInt(KEY_SESSION_COUNT, 0).coerceAtLeast(0)
+        lucidCueLastFiredAtSeconds = prefs.getInt(KEY_SESSION_LAST_FIRED, 0).coerceAtLeast(0)
+
+        setPlayingMode("WHITE_NOISE")
+        setPlaying(true)
+        return true
+    }
+
+    private fun saveLucidSettings() {
+        lucidPrefs?.edit()
+            ?.putBoolean(KEY_LUCID_ENABLED, _isLucidCueEnabled.value)
+            ?.putInt(KEY_LUCID_DELAY, _lucidCueDelayMinutes.value)
+            ?.putInt(KEY_LUCID_SOUND, _lucidCueSoundType.value)
+            ?.putFloat(KEY_LUCID_VOLUME, _lucidCueVolume.value)
+            ?.putInt(KEY_LUCID_REPEAT, _lucidCueRepeatIntervalMinutes.value)
+            ?.apply()
+    }
+
+    private fun saveLucidSession() {
+        val prefs = lucidPrefs ?: return
+        val active = _isPlaying.value && _playingMode.value == "WHITE_NOISE" && _isLucidCueEnabled.value
+        val editor = prefs.edit().putBoolean(KEY_SESSION_ACTIVE, active)
+        if (active) {
+            editor
+                .putInt(KEY_SESSION_ELAPSED, _lucidCueElapsedSeconds.value)
+                .putInt(KEY_SESSION_COUNT, _lucidCueTriggerCount.value)
+                .putInt(KEY_SESSION_LAST_FIRED, lucidCueLastFiredAtSeconds)
+                .putString(KEY_SESSION_PRESET, _activePreset.value)
+                .putString(
+                    KEY_SESSION_VOLUMES,
+                    _volumes.value.entries.joinToString(";") { "${it.key.name}=${it.value}" }
+                )
+        }
+        editor.apply()
+    }
+
     fun setLucidCueEnabled(enabled: Boolean) {
         _isLucidCueEnabled.value = enabled
         if (!enabled) {
             _lucidCueElapsedSeconds.value = 0
             _lucidCueTriggerCount.value = 0
+            lucidCueLastFiredAtSeconds = 0
         }
+        saveLucidSettings()
+        saveLucidSession()
     }
 
     fun setLucidCueDelayMinutes(mins: Int) {
         _lucidCueDelayMinutes.value = mins.coerceIn(5, 240)
+        saveLucidSettings()
     }
 
     fun setLucidCueSoundType(type: Int) {
-        _lucidCueSoundType.value = type
+        _lucidCueSoundType.value = type.coerceIn(1, 5)
+        saveLucidSettings()
     }
 
     fun setLucidCueVolume(vol: Float) {
         _lucidCueVolume.value = vol.coerceIn(0.05f, 1.0f)
+        saveLucidSettings()
     }
 
     fun setLucidCueRepeatIntervalMinutes(mins: Int) {
-        _lucidCueRepeatIntervalMinutes.value = mins
+        _lucidCueRepeatIntervalMinutes.value = mins.coerceAtLeast(0)
+        saveLucidSettings()
     }
 
     fun resetLucidCueElapsed() {
         _lucidCueElapsedSeconds.value = 0
         _lucidCueTriggerCount.value = 0
+        lucidCueLastFiredAtSeconds = 0
+        saveLucidSession()
     }
 
     fun triggerLucidCuePreview() {
         _isLucidCueTesting.value = true
-        _lucidCueTriggerEvent.value = System.currentTimeMillis()
+        lucidCueTriggerChannel.trySend(Unit)
+    }
+
+    /**
+     * Elapsed second at which the next cue is due, or null if no more cues are scheduled.
+     * Computed from the current settings, so changing the delay or repeat interval mid-session
+     * reschedules instead of skipping cues (e.g. a delay shortened below the elapsed time fires
+     * on the next tick rather than never).
+     */
+    private fun nextLucidCueAtSeconds(): Int? {
+        return if (_lucidCueTriggerCount.value == 0) {
+            _lucidCueDelayMinutes.value * 60
+        } else {
+            val repeatMinutes = _lucidCueRepeatIntervalMinutes.value
+            if (repeatMinutes > 0) lucidCueLastFiredAtSeconds + repeatMinutes * 60 else null
+        }
     }
 
     fun stopLucidCuePreview() {
@@ -192,6 +315,7 @@ object SleepNoiseManager {
 
     fun setPlaying(playing: Boolean) {
         _isPlaying.value = playing
+        saveLucidSession()
     }
 
     fun setPlayingMode(mode: String) {
@@ -287,18 +411,16 @@ object SleepNoiseManager {
                 // White noise mode
                 // 1. Handle Lucid Dream Cue progression if enabled
                 if (_isLucidCueEnabled.value) {
-                    _lucidCueElapsedSeconds.value += 1
-                    val elapsed = _lucidCueElapsedSeconds.value
-                    val delaySec = _lucidCueDelayMinutes.value * 60
-                    if (elapsed == delaySec) {
-                        _lucidCueTriggerEvent.value = System.currentTimeMillis()
+                    val elapsed = _lucidCueElapsedSeconds.value + 1
+                    _lucidCueElapsedSeconds.value = elapsed
+                    val nextCueAt = nextLucidCueAtSeconds()
+                    if (nextCueAt != null && elapsed >= nextCueAt) {
+                        lucidCueLastFiredAtSeconds = elapsed
                         _lucidCueTriggerCount.value += 1
-                    } else if (elapsed > delaySec && _lucidCueRepeatIntervalMinutes.value > 0) {
-                        val repeatSec = _lucidCueRepeatIntervalMinutes.value * 60
-                        if ((elapsed - delaySec) % repeatSec == 0) {
-                            _lucidCueTriggerEvent.value = System.currentTimeMillis()
-                            _lucidCueTriggerCount.value += 1
-                        }
+                        lucidCueTriggerChannel.trySend(Unit)
+                        saveLucidSession()
+                    } else if (elapsed % SESSION_SAVE_INTERVAL_SECONDS == 0) {
+                        saveLucidSession()
                     }
                 }
 

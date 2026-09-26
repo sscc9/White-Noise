@@ -1,121 +1,188 @@
 package com.example.audio
 
-import java.util.Random
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
 
 /**
- * Procedural synthesizer for Lucid Dream Reality Check Audio Cues (WBTB).
- * Designed scientifically to infiltrate the dreaming mind (REM stage)
- * with high-contrast, anomalous acoustic overtones that stand out from background soundscapes
- * (especially deep ocean waves and low-frequency rumble) without jarring the user awake.
+ * Procedural synthesizer for the lucid dream (WBTB) audio cues.
+ *
+ * Each cue is a short, soft sound meant to stand out from the background soundscape
+ * (e.g. low ocean rumble) without being loud enough to wake the sleeper.
+ *
+ * Threading: [triggerCue] / [stopCue] may be called from any thread. They only post a request;
+ * all synthesis state is owned by the audio thread that calls [nextSample].
  */
 class LucidDreamCueSynthesizer {
 
     private val sampleRate = 44100.0
 
-    // Cue playback state
+    // Requests posted from other threads, consumed by the audio thread in nextSample()
+    private val pendingCueType = AtomicInteger(0) // 0 = no pending request
+    private val stopRequested = AtomicBoolean(false)
+
+    // Cue playback state (audio thread only, except isPlaying which is read by isActive)
+    @Volatile
     private var isPlaying = false
     private var currentCueType = 1
     private var cueElapsedSamples = 0L
-    private var cueTotalSamples = 0L
+    private var cueDrySamples = 0L
 
-    // Type 1: 528Hz & 660Hz Solfeggio Dual-Tone Lucid Bell (🌟 Deep Sea Odyssey Best Match)
+    // After the dry signal ends, keep running the reverb so its tail decays naturally instead of being cut
+    private val tailSamples = (sampleRate * 1.5).toLong()
+    // Dry signal fades out over its last 0.5s so the cue never ends on an audible step
+    private val dryFadeOutSamples = (sampleRate * 0.5).toLong()
+    // Final safety fade at the very end of the reverb tail
+    private val tailFadeOutSamples = (sampleRate * 0.2).toLong()
+
+    // Type 1: 528Hz & 660Hz dual-tone bell
     private var bellPhaseA = 0.0
     private var bellPhaseB = 0.0
 
     // Type 2: Crystal Wind Chimes (4 high-register crystalline chimes)
     private val chimePhases = DoubleArray(4)
+    private val chimeShimmerPhases = DoubleArray(4) // inharmonic partial at 2.76x, needs its own accumulator
     private val chimeFreqs = doubleArrayOf(2093.0, 2637.0, 3136.0, 3520.0) // C7, E7, G7, A7
     private val chimeDelays = doubleArrayOf(0.0, 0.45, 0.95, 1.45)
+    private val chimeShimmerRatio = 2.76
 
     // Type 3: Dream Music Box (4 delicate metallic tines: C6, G6, E6, C7)
     private val musicBoxPhases = DoubleArray(4)
     private val musicBoxFreqs = doubleArrayOf(1046.5, 1567.98, 1318.5, 2093.0)
     private val musicBoxDelays = doubleArrayOf(0.0, 0.7, 1.4, 2.1)
 
-    // Type 4: Crystal Dew Drops (3 rhythmic serene droplets)
-    private var dropPhase = 0.0
+    // Type 4: Crystal Dew Drops (3 rhythmic droplets; windows overlap, so each drop has its own phase)
+    private val dropPhases = DoubleArray(3)
+    private val dropTimes = doubleArrayOf(0.0, 0.85, 1.7)
+    private val dropBaseFreqs = doubleArrayOf(1250.0, 1500.0, 1750.0)
+    private val dropLength = 1.2
+    private val dropGateFade = 0.1
 
-    // Type 5: Zen Singing Bowl & Tibetan Bell (for users listening to rain/fire without bowl)
+    // Type 5: Singing Bowl
     private var bowlPhase1 = 0.0
     private var bowlPhase2 = 0.0
     private var bowlPhase3 = 0.0
     private var bowlLfoPhase = 0.0
 
-    // Schroeder Reverb for ethereal acoustic aura
-    private val reverbLeft = SchroederReverb(
+    // Schroeder Reverb for ethereal acoustic aura (output is dual mono, so one channel is enough)
+    private val reverb = SchroederReverb(
         combDelays = intArrayOf(1116, 1356, 1422, 1656),
         allPassDelays = intArrayOf(225, 341),
         combFeedback = 0.82f
     )
-    private val reverbRight = SchroederReverb(
-        combDelays = intArrayOf(1187, 1311, 1481, 1613),
-        allPassDelays = intArrayOf(251, 317),
-        combFeedback = 0.82f
-    )
 
+    /** Request a cue. Safe to call from any thread; takes effect on the next audio sample. */
     fun triggerCue(cueType: Int) {
+        stopRequested.set(false)
+        pendingCueType.set(if (cueType in 1..5) cueType else 1)
+    }
+
+    /** Request an immediate stop. Safe to call from any thread. */
+    fun stopCue() {
+        pendingCueType.set(0)
+        stopRequested.set(true)
+    }
+
+    val isActive: Boolean
+        get() = isPlaying || pendingCueType.get() != 0
+
+    private fun startCue(cueType: Int) {
         currentCueType = cueType
         cueElapsedSamples = 0L
         isPlaying = true
 
-        // Total duration per cue type (~5.5 to 6.5 seconds for complete natural decay)
-        cueTotalSamples = when (cueType) {
+        // Dry duration per cue type (~5 to 6.5 seconds for complete natural decay)
+        cueDrySamples = when (cueType) {
             1 -> (sampleRate * 6.0).toLong() // 2-tone bell
             2 -> (sampleRate * 5.5).toLong() // Crystal wind chimes
             3 -> (sampleRate * 6.5).toLong() // Dream music box
             4 -> (sampleRate * 5.0).toLong() // 3 crystal dew drops
-            5 -> (sampleRate * 6.5).toLong() // Zen singing bowl
+            5 -> (sampleRate * 6.5).toLong() // Singing bowl
             else -> (sampleRate * 6.0).toLong()
         }
 
-        // Reset all phases
+        // Reset all phases and clear any leftover reverb from a previous cue
         bellPhaseA = 0.0
         bellPhaseB = 0.0
-        for (i in chimePhases.indices) chimePhases[i] = 0.0
-        for (i in musicBoxPhases.indices) musicBoxPhases[i] = 0.0
-        dropPhase = 0.0
+        chimePhases.fill(0.0)
+        chimeShimmerPhases.fill(0.0)
+        musicBoxPhases.fill(0.0)
+        dropPhases.fill(0.0)
         bowlPhase1 = 0.0
         bowlPhase2 = 0.0
         bowlPhase3 = 0.0
         bowlLfoPhase = 0.0
+        reverb.reset()
     }
 
-    fun stopCue() {
+    private fun finishCue() {
         isPlaying = false
         cueElapsedSamples = 0L
+        reverb.reset()
     }
 
-    val isActive: Boolean
-        get() = isPlaying
-
     fun nextSample(): Float {
+        if (stopRequested.getAndSet(false)) {
+            finishCue()
+        }
+        val pending = pendingCueType.getAndSet(0)
+        if (pending != 0) {
+            startCue(pending)
+        }
         if (!isPlaying) return 0f
 
-        if (cueElapsedSamples >= cueTotalSamples) {
-            isPlaying = false
-            return 0f
+        val n = cueElapsedSamples
+        val dry = if (n < cueDrySamples) {
+            renderDry(n.toDouble() / sampleRate) * dryFadeGain(n)
+        } else {
+            0f
         }
 
-        val t = cueElapsedSamples.toDouble() / sampleRate
-        var rawSample = 0f
+        // Apply Schroeder Reverb for spatial immersion and dream-like acoustic aura
+        val wet = reverb.process(dry)
+        var combined = dry * 0.72f + wet * 0.38f
 
-        when (currentCueType) {
+        val tailEnd = cueDrySamples + tailSamples
+        val remaining = tailEnd - n
+        if (remaining < tailFadeOutSamples) {
+            combined *= (remaining.toFloat() / tailFadeOutSamples).coerceIn(0f, 1f)
+        }
+
+        cueElapsedSamples++
+        if (cueElapsedSamples >= tailEnd) {
+            finishCue()
+        }
+        return combined.coerceIn(-1.0f, 1.0f)
+    }
+
+    // Raised-cosine fade over the last part of the dry signal
+    private fun dryFadeGain(n: Long): Float {
+        val fadeStart = cueDrySamples - dryFadeOutSamples
+        if (n < fadeStart) return 1f
+        val x = (n - fadeStart).toDouble() / dryFadeOutSamples
+        return (0.5 * (1.0 + cos(PI * x))).toFloat()
+    }
+
+    private fun advance(phase: Double, freq: Double): Double {
+        var p = phase + (2.0 * PI * freq) / sampleRate
+        if (p > 2.0 * PI) p -= 2.0 * PI
+        return p
+    }
+
+    private fun renderDry(t: Double): Float {
+        return when (currentCueType) {
             1 -> {
                 // Type 1: 现实检验双音阶梦钟 (528Hz & 660Hz) - 与深海低音反差极强
                 // Tone A: 528Hz at t = 0s
                 val attackA = 0.05
-                val decayA = if (t >= 0.0) {
-                    val dtA = t
-                    val att = if (dtA < attackA) (dtA / attackA).toFloat() else 1f
-                    att * exp(-dtA * 0.72).toFloat()
-                } else 0f
+                val attA = if (t < attackA) (t / attackA).toFloat() else 1f
+                val decayA = attA * exp(-t * 0.72).toFloat()
 
-                bellPhaseA += (2.0 * PI * 528.0) / sampleRate
-                if (bellPhaseA > 2.0 * PI) bellPhaseA -= 2.0 * PI
-                // Add gentle overtone at 1056Hz
+                bellPhaseA = advance(bellPhaseA, 528.0)
+                // Add gentle overtone at 1056Hz (integer multiple, so it wraps cleanly with the fundamental)
                 val sampleA = (sin(bellPhaseA) + 0.3 * sin(bellPhaseA * 2.0)).toFloat() * decayA * 0.60f
 
                 // Tone B: 660Hz at t = 1.2s
@@ -126,12 +193,11 @@ class LucidDreamCueSynthesizer {
                     val attB = if (dtB < attackB) (dtB / attackB).toFloat() else 1f
                     val decayB = attB * exp(-dtB * 0.72).toFloat()
 
-                    bellPhaseB += (2.0 * PI * 660.0) / sampleRate
-                    if (bellPhaseB > 2.0 * PI) bellPhaseB -= 2.0 * PI
+                    bellPhaseB = advance(bellPhaseB, 660.0)
                     sampleB = (sin(bellPhaseB) + 0.3 * sin(bellPhaseB * 2.0)).toFloat() * decayB * 0.55f
                 }
 
-                rawSample = sampleA + sampleB
+                sampleA + sampleB
             }
 
             2 -> {
@@ -142,17 +208,17 @@ class LucidDreamCueSynthesizer {
                     val startT = chimeDelays[i]
                     if (t >= startT) {
                         val dt = t - startT
-                        chimePhases[i] += (2.0 * PI * chimeFreqs[i]) / sampleRate
-                        if (chimePhases[i] > 2.0 * PI) chimePhases[i] -= 2.0 * PI
+                        chimePhases[i] = advance(chimePhases[i], chimeFreqs[i])
+                        chimeShimmerPhases[i] = advance(chimeShimmerPhases[i], chimeFreqs[i] * chimeShimmerRatio)
 
                         val attack = if (dt < 0.02) (dt / 0.02).toFloat() else 1f
                         val decay = attack * exp(-dt * 1.8).toFloat()
-                        // Pure sine with high shimmer
-                        val tone = (sin(chimePhases[i]) + 0.15 * sin(chimePhases[i] * 2.76)).toFloat()
+                        // Pure sine with an inharmonic shimmer partial
+                        val tone = (sin(chimePhases[i]) + 0.15 * sin(chimeShimmerPhases[i])).toFloat()
                         chimeMix += tone * decay * 0.32f
                     }
                 }
-                rawSample = chimeMix
+                chimeMix
             }
 
             3 -> {
@@ -163,8 +229,7 @@ class LucidDreamCueSynthesizer {
                     val startT = musicBoxDelays[i]
                     if (t >= startT) {
                         val dt = t - startT
-                        musicBoxPhases[i] += (2.0 * PI * musicBoxFreqs[i]) / sampleRate
-                        if (musicBoxPhases[i] > 2.0 * PI) musicBoxPhases[i] -= 2.0 * PI
+                        musicBoxPhases[i] = advance(musicBoxPhases[i], musicBoxFreqs[i])
 
                         val attack = if (dt < 0.015) (dt / 0.015).toFloat() else 1f
                         val decay = attack * exp(-dt * 2.1).toFloat()
@@ -173,49 +238,40 @@ class LucidDreamCueSynthesizer {
                         musicBoxMix += tine * decay * 0.40f
                     }
                 }
-                rawSample = musicBoxMix
+                musicBoxMix
             }
 
             4 -> {
                 // Type 4: 幽潭灵露 (3 Rhythmic Crystal Drops at 0.0s, 0.85s, 1.7s)
-                val dropTimes = doubleArrayOf(0.0, 0.85, 1.7)
-                val baseFreqs = doubleArrayOf(1250.0, 1500.0, 1750.0)
-
                 var dropSample = 0f
                 for (i in dropTimes.indices) {
                     val dropStart = dropTimes[i]
-                    if (t >= dropStart && t < dropStart + 1.2) {
+                    if (t >= dropStart && t < dropStart + dropLength) {
                         val dt = t - dropStart
                         val curFreq = if (dt < 0.025) {
-                            baseFreqs[i] + (dt / 0.025) * 450.0
+                            dropBaseFreqs[i] + (dt / 0.025) * 450.0
                         } else {
-                            baseFreqs[i] + 450.0 - ((dt - 0.025) * 150.0)
+                            dropBaseFreqs[i] + 450.0 - ((dt - 0.025) * 150.0)
                         }
 
-                        dropPhase += (2.0 * PI * curFreq) / sampleRate
-                        if (dropPhase > 2.0 * PI) dropPhase -= 2.0 * PI
+                        dropPhases[i] = advance(dropPhases[i], curFreq)
 
                         val attack = if (dt < 0.015) (dt / 0.015).toFloat() else 1f
-                        val decay = attack * exp(-dt * 4.2).toFloat()
-                        dropSample += sin(dropPhase).toFloat() * decay * 0.55f
+                        // Short fade before the drop's window closes, so the gate doesn't click
+                        val gate = ((dropLength - dt) / dropGateFade).toFloat().coerceIn(0f, 1f)
+                        val decay = attack * gate * exp(-dt * 4.2).toFloat()
+                        dropSample += sin(dropPhases[i]).toFloat() * decay * 0.55f
                     }
                 }
-                rawSample = dropSample
+                dropSample
             }
 
             5 -> {
-                // Type 5: 传统空灵颂钵 (Zen Tibetan Singing Bowl) - 供无钵声背景使用
-                bowlPhase1 += (2.0 * PI * 216.0) / sampleRate
-                if (bowlPhase1 > 2.0 * PI) bowlPhase1 -= 2.0 * PI
-
-                bowlPhase2 += (2.0 * PI * 432.0) / sampleRate
-                if (bowlPhase2 > 2.0 * PI) bowlPhase2 -= 2.0 * PI
-
-                bowlPhase3 += (2.0 * PI * 864.0) / sampleRate
-                if (bowlPhase3 > 2.0 * PI) bowlPhase3 -= 2.0 * PI
-
-                bowlLfoPhase += (2.0 * PI * 0.25) / sampleRate
-                if (bowlLfoPhase > 2.0 * PI) bowlLfoPhase -= 2.0 * PI
+                // Type 5: 空灵颂钵 (Singing Bowl) - 供无钵声背景使用
+                bowlPhase1 = advance(bowlPhase1, 216.0)
+                bowlPhase2 = advance(bowlPhase2, 432.0)
+                bowlPhase3 = advance(bowlPhase3, 864.0)
+                bowlLfoPhase = advance(bowlLfoPhase, 0.25)
 
                 val attackDuration = 0.08
                 val attackEnv = if (t < attackDuration) (t / attackDuration).toFloat() else 1f
@@ -230,15 +286,10 @@ class LucidDreamCueSynthesizer {
                 val s2 = sin(bowlPhase2).toFloat() * decay2 * 0.35f
                 val s3 = sin(bowlPhase3).toFloat() * decay3 * 0.15f
 
-                rawSample = (s1 + s2 + s3) * tremolo * attackEnv
+                (s1 + s2 + s3) * tremolo * attackEnv
             }
+
+            else -> 0f
         }
-
-        // Apply Schroeder Reverb for spatial immersion and dream-like acoustic aura
-        val wet = reverbLeft.process(rawSample)
-        val combined = rawSample * 0.72f + wet * 0.38f
-
-        cueElapsedSamples++
-        return combined.coerceIn(-1.0f, 1.0f)
     }
 }

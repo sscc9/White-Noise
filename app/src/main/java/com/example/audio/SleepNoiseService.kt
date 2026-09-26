@@ -13,6 +13,7 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -57,6 +58,7 @@ class SleepNoiseService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
+        SleepNoiseManager.init(this)
         createNotificationChannel()
         
         // Observe playing state changes in the manager
@@ -74,24 +76,33 @@ class SleepNoiseService : Service() {
 
         // Observe Lucid Dream Cue trigger events
         serviceScope.launch {
-            SleepNoiseManager.lucidCueTriggerEvent.collect { timestamp ->
-                if (timestamp > 0L) {
-                    val cueType = SleepNoiseManager.lucidCueSoundType.value
-                    lucidCueSynthesizer.triggerCue(cueType)
-                    updateNotification()
-                    if (SleepNoiseManager.isLucidCueTesting.value) {
-                        delay(6500)
-                        SleepNoiseManager.stopLucidCuePreview()
-                    }
+            SleepNoiseManager.lucidCueTriggerEvents.collect {
+                // Cues are only mixed into the white noise path; don't leave one armed while in binaural mode
+                if (SleepNoiseManager.playingMode.value != "WHITE_NOISE") {
+                    SleepNoiseManager.stopLucidCuePreview()
+                    return@collect
+                }
+                val cueType = SleepNoiseManager.lucidCueSoundType.value
+                lucidCueSynthesizer.triggerCue(cueType)
+                updateNotification()
+                if (SleepNoiseManager.isLucidCueTesting.value) {
+                    delay(6500)
+                    SleepNoiseManager.stopLucidCuePreview()
                 }
             }
         }
 
-        // Start 1-second timer ticking
+        // Start 1-second timer ticking. Ticks are derived from the monotonic clock so that
+        // scheduling jitter over a whole night doesn't accumulate into minutes of drift.
         timerJob = serviceScope.launch {
+            var lastTickAt = SystemClock.elapsedRealtime()
             while (isActive) {
-                delay(1000)
-                SleepNoiseManager.tickTimer()
+                delay(1000 - (SystemClock.elapsedRealtime() - lastTickAt).coerceIn(0L, 1000L))
+                val now = SystemClock.elapsedRealtime()
+                // Catch up on missed seconds, but cap it so a long suspension can't fire a burst of cues
+                val dueTicks = ((now - lastTickAt) / 1000L).coerceIn(0L, 5L)
+                lastTickAt = if (now - lastTickAt > 5000L) now else lastTickAt + dueTicks * 1000L
+                repeat(dueTicks.toInt()) { SleepNoiseManager.tickTimer() }
             }
         }
     }
@@ -99,6 +110,16 @@ class SleepNoiseService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
         Log.d(TAG, "onStartCommand action: $action")
+
+        // A null intent means the system restarted us (START_STICKY) after killing the process.
+        // Resume an interrupted lucid cue night instead of silently dropping the remaining cues.
+        if (intent == null) {
+            startForegroundService()
+            if (SleepNoiseManager.restoreInterruptedLucidSession()) {
+                Log.d(TAG, "Resumed interrupted lucid cue session")
+            }
+            return START_STICKY
+        }
         
         when (action) {
             ACTION_START -> {
@@ -323,6 +344,10 @@ class SleepNoiseService : Service() {
                     val activeMode = SleepNoiseManager.playingMode.value
                     
                     if (activeMode == "BINAURAL") {
+                        // Cues aren't mixed in binaural mode; drop any cue left over from a mode switch
+                        if (lucidCueSynthesizer.isActive) {
+                            lucidCueSynthesizer.stopCue()
+                        }
                         val themeId = SleepNoiseManager.binauralThemeId.value
                         val managerElapsed = SleepNoiseManager.binauralElapsedSeconds.value
                         
@@ -402,7 +427,7 @@ class SleepNoiseService : Service() {
                                 currentMasterFade = (currentMasterFade - fadeStep).coerceAtLeast(targetMasterFade)
                             }
 
-                            mixedSample = mixedSample.coerceIn(-1.0f, 1.0f) * 0.9f
+                            mixedSample = softClip(mixedSample) * 0.9f
                             mixedSample *= currentMasterFade
 
                             val shortVal = (mixedSample * 32767f).toInt().toShort()
@@ -420,6 +445,19 @@ class SleepNoiseService : Service() {
                 isAudioRunning.set(false)
             }
         }
+    }
+
+    /**
+     * Transparent below the knee, then bends smoothly toward ±1 instead of hard clipping,
+     * so a cue landing on a loud background doesn't produce harsh distortion.
+     */
+    private fun softClip(x: Float): Float {
+        val knee = 0.8f
+        val ax = kotlin.math.abs(x)
+        if (ax <= knee) return x
+        val headroom = 1f - knee
+        val shaped = knee + headroom * kotlin.math.tanh((ax - knee) / headroom)
+        return if (x < 0f) -shaped else shaped
     }
 
     @Synchronized
