@@ -313,7 +313,7 @@ class SleepNoiseService : Service() {
                             .setSampleRate(sampleRate)
                             .build()
                     )
-                    .setBufferSizeInBytes(bufferSize)
+                    .setBufferSizeInBytes(bufferSize * 4)
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
 
@@ -332,7 +332,8 @@ class SleepNoiseService : Service() {
                 var localElapsedSeconds = SleepNoiseManager.binauralElapsedSeconds.value
                 val buffer = ShortArray(2048) // Interleaved stereo buffer
                 val cueStereo = FloatArray(2) // Reusable stereo buffer for lucid dream cues
-                val fadeStep = 1.0f / (sampleRate.toFloat() * 1.5f) // 1.5 seconds linear fade for background
+                val fadeStep = 1.0f / (sampleRate.toFloat() * 2.0f) // 2.0 seconds linear fade for background
+                var lastUnderrunCount = 0
 
                 while (isActive && isAudioRunning.get()) {
                     val isCueActive = lucidCueSynthesizer.isActive
@@ -373,7 +374,7 @@ class SleepNoiseService : Service() {
 
                             var sampleL = 0f
                             var sampleR = 0f
-                            if (isBgPlaying && currentMasterFade > 0.001f) {
+                            if (currentMasterFade > 0.001f) {
                                 binauralSynthesizer.nextSample(
                                     themeId = themeId,
                                     elapsedSeconds = localElapsedSeconds,
@@ -394,8 +395,8 @@ class SleepNoiseService : Service() {
                                 sampleR += cueStereo[1] * cueVolume
                             }
 
-                            val limitedL = kotlin.math.tanh(sampleL.toDouble()).toFloat() * 0.95f
-                            val limitedR = kotlin.math.tanh(sampleR.toDouble()).toFloat() * 0.95f
+                            val limitedL = sampleL.coerceIn(-1.0f, 1.0f)
+                            val limitedR = sampleR.coerceIn(-1.0f, 1.0f)
 
                             buffer[2 * i] = (limitedL * 32767f).toInt().toShort()
                             buffer[2 * i + 1] = (limitedR * 32767f).toInt().toShort()
@@ -412,7 +413,7 @@ class SleepNoiseService : Service() {
                             }
 
                             var mixedSample = 0f
-                            if (isBgPlaying && currentMasterFade > 0.001f) {
+                            if (currentMasterFade > 0.001f) {
                                 val size = soundTypes.size
                                 for (j in 0 until size) {
                                     val type = soundTypes[j]
@@ -423,27 +424,31 @@ class SleepNoiseService : Service() {
                                 }
                             }
 
-                            var sampleL = mixedSample * currentMasterFade
-                            var sampleR = mixedSample * currentMasterFade
-
-                            // Mix in gentle Lucid Dream Cue with immediate crisp attack (NO master fade attenuation)
-                            if (isCueActive) {
+                            if (!isCueActive) {
+                                var out = mixedSample.coerceIn(-1.0f, 1.0f) * 0.9f
+                                out *= currentMasterFade
+                                val shortVal = (out * 32767f).toInt().toShort()
+                                buffer[2 * i] = shortVal
+                                buffer[2 * i + 1] = shortVal
+                            } else {
+                                val bg = mixedSample.coerceIn(-1.0f, 1.0f) * 0.9f * currentMasterFade
                                 lucidCueSynthesizer.nextStereoSample(cueStereo)
-                                sampleL += cueStereo[0] * cueVolume
-                                sampleR += cueStereo[1] * cueVolume
+                                val out = (bg + cueStereo[0] * cueVolume).coerceIn(-1.0f, 1.0f)
+                                val shortVal = (out * 32767f).toInt().toShort()
+                                buffer[2 * i] = shortVal
+                                buffer[2 * i + 1] = shortVal
                             }
-
-                            val limitedL = kotlin.math.tanh(sampleL.toDouble()).toFloat() * 0.95f
-                            val limitedR = kotlin.math.tanh(sampleR.toDouble()).toFloat() * 0.95f
-
-                            buffer[2 * i] = (limitedL * 32767f).toInt().toShort()
-                            buffer[2 * i + 1] = (limitedR * 32767f).toInt().toShort()
                         }
                     }
 
                     try {
                         if (track.state == AudioTrack.STATE_INITIALIZED) {
                             track.write(buffer, 0, buffer.size)
+                            val count = track.underrunCount
+                            if (count > lastUnderrunCount) {
+                                Log.w(TAG, "AudioTrack underrun: $count")
+                                lastUnderrunCount = count
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "AudioTrack write failed", e)
@@ -486,11 +491,17 @@ class SleepNoiseService : Service() {
         SleepNoiseManager.stopTimer()
         SleepNoiseManager.cancelTlrTraining()
         SleepNoiseManager.stopLucidCuePreview()
-        isAudioRunning.set(false)
-        
-        timerJob?.cancel()
-        serviceJob.cancel()
-        stopSelf()
+
+        serviceScope.launch {
+            var waitTime = 0
+            while (isAudioRunning.get() && waitTime < 250) {
+                delay(10)
+                waitTime++
+            }
+            timerJob?.cancel()
+            serviceJob.cancel()
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {

@@ -49,15 +49,10 @@ class LucidDreamCueSynthesizer {
     private var malletFilter = 0f
     private val random = java.util.Random()
 
-    // Full Stereo Schroeder Reverb with decorrelated delay lines
+    // Schroeder Reverb
     private val reverbLeft = SchroederReverb(
         combDelays = intArrayOf(1116, 1356, 1422, 1656),
         allPassDelays = intArrayOf(225, 341),
-        combFeedback = 0.82f
-    )
-    private val reverbRight = SchroederReverb(
-        combDelays = intArrayOf(1187, 1311, 1481, 1613),
-        allPassDelays = intArrayOf(251, 317),
         combFeedback = 0.82f
     )
 
@@ -291,15 +286,10 @@ class LucidDreamCueSynthesizer {
             1.0f
         }
 
-        // Apply true stereo decorrelated Schroeder Reverb
-        val wetL = reverbLeft.process(rawMono)
-        val wetR = reverbRight.process(rawMono)
-
-        val outL = (rawMono * 0.70f + wetL * 0.35f) * releaseEnv
-        val outR = (rawMono * 0.70f + wetR * 0.35f) * releaseEnv
-
-        out[0] = outL.coerceIn(-1.0f, 1.0f)
-        out[1] = outR.coerceIn(-1.0f, 1.0f)
+        val wet = reverbLeft.process(rawMono)
+        val mono = ((rawMono * 0.72f + wet * 0.38f) * releaseEnv).coerceIn(-1.0f, 1.0f)
+        out[0] = mono
+        out[1] = mono
 
         cueElapsedSamples++
     }
